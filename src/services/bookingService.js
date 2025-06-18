@@ -286,7 +286,7 @@ const bookingService = {
                         });
                         
                         if (bookingWithIncludes) {
-                            // Transla
+                           
                             const translatedBooking = await translateBookingFields(bookingWithIncludes, 'AR', 'EN');
                             const bookingCacheKey = cacheKeys.bookingAr(booking.id);
                             await redisClient.setEx(bookingCacheKey, AR_CACHE_EXPIRATION, JSON.stringify(translatedBooking));

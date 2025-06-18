@@ -43,6 +43,7 @@ const cacheKeys = {
     listingReviewsAr: (listingId) => `listing:${listingId}:reviews:ar`,
     allReviewsAr: (filterHash = '') => `reviews:all${filterHash}:ar`,
     listingAr: (listingId) => `listing:${listingId}:ar`,
+    bookingAr: (bookingId) => `booking:${bookingId}:ar`,
 };
 
 // --- Helper Functions ---

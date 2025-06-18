@@ -4,6 +4,7 @@ import { AuditLogAction } from '@prisma/client';
 import { createClient } from "redis";
 import * as deepl from "deepl-node";
 import { sendMail } from '../utils/mailer.js';
+import pLimit from 'p-limit';
 
 // --- DeepL Configuration ---
 const DEEPL_AUTH_KEY = process.env.DEEPL_AUTH_KEY || "YOUR_DEEPL_AUTH_KEY_HERE";
@@ -66,6 +67,28 @@ async function translateBookingFields(booking, targetLang, sourceLang = null) {
     if (booking.additionalNote) {
         translatedBooking.additionalNote = await translateText(booking.additionalNote, targetLang, sourceLang);
     }
+    if (booking.ageGroup) {
+        translatedBooking.ageGroup = await translateText(booking.ageGroup, targetLang, sourceLang);
+    }
+    if (booking.status) {
+        translatedBooking.status = await translateText(booking.status, targetLang, sourceLang);
+    }
+    if (booking.booking_hours) {
+        translatedBooking.booking_hours = await translateText(booking.booking_hours, targetLang, sourceLang
+        );
+    }
+    if (booking.paymentMethod) {
+        translatedBooking.paymentMethod = await translateText(booking.paymentMethod, targetLang, sourceLang
+        );
+    }
+    if (booking.user) {
+        translatedBooking.user = {
+            ...booking.user,
+            fname: await translateText(booking.user.fname, targetLang, sourceLang),
+            lname: await translateText(booking.user.lname, targetLang, sourceLang),
+           
+        };
+    }
     if (booking.listing) {
         translatedBooking.listing = {
             ...booking.listing,
@@ -73,12 +96,24 @@ async function translateBookingFields(booking, targetLang, sourceLang = null) {
             description: await translateText(booking.listing.description, targetLang, sourceLang),
             facilities: booking.listing.facilities ? await Promise.all(booking.listing.facilities.map(f => translateText(f, targetLang, sourceLang))) : [],
             location: booking.listing.location ? await Promise.all(booking.listing.location.map(l => translateText(l, targetLang, sourceLang))) : [],
+            agegroup: booking.listing.agegroup ? await Promise.all(booking.listing.agegroup.map(a => translateText(a, targetLang, sourceLang))) : [],
+            operatingHours: booking.listing.operatingHours ? await Promise.all(booking.listing.operatingHours.map(o => translateText(o, targetLang, sourceLang))) : [],
+
         };
     }
     if (booking.review) {
         translatedBooking.review = {
             ...booking.review,
+            status: await translateText(booking.review.status, targetLang, sourceLang),
             comment: await translateText(booking.review.comment, targetLang, sourceLang)
+        };
+    }
+
+    if (booking.reward) {
+        translatedBooking.reward = {
+            ...booking.reward,
+            description: await translateText(booking.reward.description, targetLang, sourceLang),
+            category: await translateText(booking.reward.category, targetLang, sourceLang)
         };
     }
     return translatedBooking;
@@ -114,7 +149,32 @@ function createFilterHash(filters) {
     const sortedFilters = Object.keys(filters).sort().reduce((result, key) => { result[key] = filters[key]; return result; }, {});
     return JSON.stringify(sortedFilters);
 }
-// --- Helper Functions ---
+const translationCache = new Map();
+const limit = pLimit(5);
+// Add retry delay
+function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+// // --- Helper Functions ---
+// async function translateText(text, targetLang, sourceLang = null) {
+//     if (!deeplClient) {
+//         console.warn("DeepL client is not initialized.");
+//         return text;
+//     }
+
+//     if (!text || typeof text !== 'string') {
+//         return text;
+//     }
+
+//     try {
+//         const result = await deeplClient.translateText(text, sourceLang, targetLang);
+//         console.log(`Translated: "${text}" => "${result.text}"`);
+//         return result.text;
+//     } catch (error) {
+//         console.error(`DeepL Translation error: ${error.message}`);
+//         return text;
+//     }
+// }
 async function translateText(text, targetLang, sourceLang = null) {
     if (!deeplClient) {
         console.warn("DeepL client is not initialized.");
@@ -125,13 +185,38 @@ async function translateText(text, targetLang, sourceLang = null) {
         return text;
     }
 
+    const cacheKey = `${text}::${sourceLang || 'auto'}::${targetLang}`;
+    if (translationCache.has(cacheKey)) {
+        return translationCache.get(cacheKey);
+    }
+
     try {
-        const result = await deeplClient.translateText(text, sourceLang, targetLang);
+        const result = await limit(async () => {
+            let retries = 3;
+            while (retries > 0) {
+                try {
+                    const res = await deeplClient.translateText(text, sourceLang, targetLang);
+                    return res;
+                } catch (err) {
+                    if (err.message.includes("Too many requests")) {
+                        console.warn("DeepL rate limit hit, retrying in 100ms...");
+                        await delay(100);
+                        retries--;
+                    } else {
+                        throw err;
+                    }
+                }
+            }
+            throw new Error("Failed after multiple retries due to rate limits.");
+        });
+
         console.log(`Translated: "${text}" => "${result.text}"`);
+        translationCache.set(cacheKey, result.text);
         return result.text;
+
     } catch (error) {
         console.error(`DeepL Translation error: ${error.message}`);
-        return text;
+        return text; // fallback
     }
 }
 
@@ -282,7 +367,7 @@ const bookingService = {
                         // Get booking with all includes for caching
                         const bookingWithIncludes = await prisma.booking.findUnique({
                             where: { id: booking.id },
-                            include: { user: true, listing: true, review: true, reward: true }
+                            include: { user: { select: { id: true, fname: true, lname: true, email: true } }, listing: true, review: { select: { id: true, rating: true, comment: true, createdAt: true } }, reward: true }
                         });
                         
                         if (bookingWithIncludes) {
@@ -298,7 +383,8 @@ const bookingService = {
                             include: { listing: true, review: true, reward: true },
                             orderBy: { createdAt: 'desc' }
                         });
-                        
+                        console.log(userBookings);
+
                         if (userBookings.length > 0) {
                             const translatedUserBookings = await Promise.all(
                                 userBookings.map(b => translateBookingFields(b, 'AR', 'EN'))

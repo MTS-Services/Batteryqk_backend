@@ -4,6 +4,8 @@ import { AuditLogAction } from '@prisma/client';
 import { createClient } from "redis";
 import * as deepl from "deepl-node";
 import { sendMail } from '../utils/mailer.js';
+import pLimit from 'p-limit';
+import { da } from '@faker-js/faker';
 
 // --- DeepL Configuration ---
 const DEEPL_AUTH_KEY = process.env.DEEPL_AUTH_KEY || "YOUR_DEEPL_AUTH_KEY_HERE";
@@ -47,6 +49,14 @@ const cacheKeys = {
 };
 
 // --- Helper Functions ---
+const translationCache = new Map();
+const limit = pLimit(5);
+
+function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+
 async function translateText(text, targetLang, sourceLang = null) {
     if (!deeplClient) {
         console.warn("DeepL client is not initialized.");
@@ -57,10 +67,35 @@ async function translateText(text, targetLang, sourceLang = null) {
         return text;
     }
 
+    const cacheKey = `${text}::${sourceLang || 'auto'}::${targetLang}`;
+    if (translationCache.has(cacheKey)) {
+        return translationCache.get(cacheKey);
+    }
+
     try {
-        const result = await deeplClient.translateText(text, sourceLang, targetLang);
+        const result = await limit(async () => {
+            let retries = 3;
+            while (retries > 0) {
+                try {
+                    const res = await deeplClient.translateText(text, sourceLang, targetLang);
+                    return res;
+                } catch (err) {
+                    if (err.message.includes("Too many requests")) {
+                        console.warn("DeepL rate limit hit, retrying in 100ms...");
+                        await delay(100);
+                        retries--;
+                    } else {
+                        throw err;
+                    }
+                }
+            }
+            throw new Error("Failed after multiple retries due to rate limits.");
+        });
+
         console.log(`Translated: "${text}" => "${result.text}"`);
+        translationCache.set(cacheKey, result.text);
         return result.text;
+
     } catch (error) {
         console.error(`DeepL Translation error: ${error.message}`);
         return text;
@@ -70,6 +105,117 @@ async function translateText(text, targetLang, sourceLang = null) {
 async function translateArrayFields(arr, targetLang, sourceLang = null) {
     if (!arr || !Array.isArray(arr)) return arr;
     return await Promise.all(arr.map(item => translateText(item, targetLang, sourceLang)));
+}
+async function translateBookingFields(booking, targetLang, sourceLang = null) {
+    console.log(`Translating booking fields to ${booking}...`);
+    if (!booking) return booking;
+    const translatedBooking = { ...booking };
+    if (booking.additionalNote) {
+        translatedBooking.additionalNote = await translateText(booking.additionalNote, targetLang, sourceLang);
+    }
+    if (booking.ageGroup) {
+        translatedBooking.ageGroup = await translateText(booking.ageGroup, targetLang, sourceLang);
+    }
+    if (booking.status) {
+        translatedBooking.status = await translateText(booking.status, targetLang, sourceLang);
+    }
+    if (booking.booking_hours) {
+        translatedBooking.booking_hours = await translateText(booking.booking_hours, targetLang, sourceLang
+        );
+    }
+    if (booking.paymentMethod) {
+        translatedBooking.paymentMethod = await translateText(booking.paymentMethod, targetLang, sourceLang
+        );
+    }
+    if (booking.user) {
+        console.log(`Translating user fields for booking ${booking.id}...`);
+        // DO NOT translate user's proper names. Preserve them.
+        console.log(`Translating user name for booking ${booking.user.name}...`);
+        console.log(`Translating user fname ${booking.user.fname} and lname ${booking.user.lname}...`);
+        translatedBooking.user = {
+            ...booking.user,
+            fname: await translateText(booking.user.fname, targetLang, sourceLang),
+            lname: await translateText(booking.user.lname, targetLang, sourceLang),
+           
+        };
+    }
+    if (booking.listing) {
+        translatedBooking.listing = {
+            ...booking.listing,
+            name: await translateText(booking.listing.name, targetLang, sourceLang),
+            description: await translateText(booking.listing.description, targetLang, sourceLang),
+            facilities: booking.listing.facilities ? await Promise.all(booking.listing.facilities.map(f => translateText(f, targetLang, sourceLang))) : [],
+            location: booking.listing.location ? await Promise.all(booking.listing.location.map(l => translateText(l, targetLang, sourceLang))) : [],
+            agegroup: booking.listing.agegroup ? await Promise.all(booking.listing.agegroup.map(a => translateText(a, targetLang, sourceLang))) : [],
+            operatingHours: booking.listing.operatingHours ? await Promise.all(booking.listing.operatingHours.map(o => translateText(o, targetLang, sourceLang))) : [],
+
+        };
+    }
+    if (booking.review) {
+        translatedBooking.review = {
+            ...booking.review,
+            status: await translateText(booking.review.status, targetLang, sourceLang),
+            comment: await translateText(booking.review.comment, targetLang, sourceLang)
+        };
+    }
+
+    if (booking.reward) {
+        translatedBooking.reward = {
+            ...booking.reward,
+            description: await translateText(booking.reward.description, targetLang, sourceLang),
+            category: await translateText(booking.reward.category, targetLang, sourceLang)
+        };
+    }
+    return translatedBooking;
+}
+async function translateReviewFields(review, targetLang, sourceLang = null) {
+    if (!review) return review;
+    
+    const translatedReview = { ...review };
+    
+    // Translate review fields
+    if (review.comment) {
+        translatedReview.comment = await translateText(review.comment, targetLang, sourceLang);
+    }
+    if (review.status) {
+        translatedReview.status = await translateText(review.status, targetLang, sourceLang);
+    }
+    
+    // Translate user fields if present
+    if (review.user) {
+        translatedReview.user = {
+            ...review.user,
+            fname: await translateText(review.user.fname, targetLang, sourceLang),
+            lname: await translateText(review.user.lname, targetLang, sourceLang)
+        };
+    }
+    
+    // Translate listing fields if present
+    if (review.listing) {
+        translatedReview.listing = {
+            ...review.listing,
+            name: await translateText(review.listing.name, targetLang, sourceLang),
+            description: review.listing.description ? await translateText(review.listing.description, targetLang, sourceLang) : null,
+            agegroup: review.listing.agegroup ? await translateArrayFields(review.listing.agegroup, targetLang, sourceLang) : [],
+            location: review.listing.location ? await translateArrayFields(review.listing.location, targetLang, sourceLang) : [],
+            facilities: review.listing.facilities ? await translateArrayFields(review.listing.facilities, targetLang, sourceLang) : [],
+            operatingHours: review.listing.operatingHours ? await translateArrayFields(review.listing.operatingHours, targetLang, sourceLang) : [],
+        };
+    }
+    
+    // Translate booking fields if present
+    if (review.booking) {
+        translatedReview.booking = {
+            ...review.booking,
+            additionalNote: review.booking.additionalNote ? await translateText(review.booking.additionalNote, targetLang, sourceLang) : null,
+            ageGroup: review.booking.ageGroup ? await translateText(review.booking.ageGroup, targetLang, sourceLang) : null,
+            status: review.booking.status ? await translateText(review.booking.status, targetLang, sourceLang) : null,
+            booking_hours: review.booking.booking_hours ? await translateText(review.booking.booking_hours, targetLang, sourceLang) : null,
+            paymentMethod: review.booking.paymentMethod ? await translateText(review.booking.paymentMethod, targetLang, sourceLang) : null
+        };
+    }
+    
+    return translatedReview;
 }
 
 async function translateListingFields(listing, targetLang, sourceLang = null) {
@@ -111,7 +257,7 @@ async function translateListingFields(listing, targetLang, sourceLang = null) {
                 ...review,
                 comment: await translateText(review.comment, targetLang, sourceLang),
                 status: await translateText(review.status, targetLang, sourceLang),
-                user:  await translateText(review.user.fname, targetLang, sourceLang) + ' ' + await translateText(review.user.lname, targetLang, sourceLang),
+                user: await translateText(review.user.fname, targetLang, sourceLang) + ' ' + await translateText(review.user.lname, targetLang, sourceLang),
             }))
         );
     }
@@ -128,7 +274,7 @@ async function translateListingFields(listing, targetLang, sourceLang = null) {
                     ? await translateText(booking.booking_hours, targetLang, sourceLang)
                     : null,
                 user: await translateText(booking.user.fname, targetLang, sourceLang) + ' ' + await translateText(booking.user.lname, targetLang, sourceLang),
-                paymentMethod: await translateText(booking.paymentMethod, targetLang, sourceLang)
+                paymentMethod: booking.paymentMethod ? await translateText(booking.paymentMethod, targetLang, sourceLang) : null
             }))
         );
     }
@@ -150,12 +296,19 @@ const reviewService = {
     // 1. Create Review
     async createReview(data, userUid, lang = 'en', reqDetails = {}) {
         try {
-            const { listingId, bookingId, rating, comment } = data;
+            const { bookingId, rating, comment } = data;
 
             const user = await prisma.user.findUnique({ where: { uid: userUid } });
             if (!user) throw new Error('User not found');
 
-            const listing = await prisma.listing.findUnique({ where: { id: listingId } });
+            const booked = await prisma.booking.findUnique({
+                where: { id: bookingId },
+            });
+            if (!booked) throw new Error('Booking not found');
+            
+            const listing = await prisma.listing.findUnique({
+                where: { id: booked.listingId }
+            });
             if (!listing) throw new Error('Listing not found');
 
             // Verify booking exists and belongs to user if bookingId is provided
@@ -170,7 +323,6 @@ const reviewService = {
                     throw new Error('Booking not found or does not belong to user');
                 }
 
-                // Check if booking status is appropriate for review
                 if (booking.status === 'PENDING') {
                     throw new Error('Cannot review a pending booking. Please wait for booking confirmation.');
                 }
@@ -179,12 +331,10 @@ const reviewService = {
                     throw new Error('Cannot review a cancelled booking.');
                 }
 
-                // Check if booking payment method is PAID
                 if (booking.paymentMethod !== 'PAID') {
                     throw new Error('You can only review bookings that have been paid for.');
                 }
 
-                // Check if booking already has a review
                 if (booking.review) {
                     throw new Error('This booking already has a review.');
                 }
@@ -198,14 +348,15 @@ const reviewService = {
             const review = await prisma.review.create({
                 data: {
                     userId: user.id,
-                    listingId: listingId,
+                    listingId: booked.listingId,
                     rating: parseInt(rating),
                     comment: dataForDb.comment,
                     status: 'PENDING',
                 },
                 include: { 
                     user: { select: { fname: true, lname: true, uid: true } }, 
-                    listing: { select: { name: true, id: true } } 
+                    listing: { select: { name: true, id: true, description: true, agegroup: true, location: true, facilities: true, operatingHours: true } },
+                    booking: bookingId ? { select: { id: true, bookingDate: true, additionalNote: true, ageGroup: true, status: true, booking_hours: true, paymentMethod: true } } : false
                 }
             });
 
@@ -215,6 +366,17 @@ const reviewService = {
                     where: { id: bookingId },
                     data: { review_id: review.id }
                 });
+            }
+
+            // Cache the newly created review immediately in Arabic if applicable
+            if (lang === 'ar' && deeplClient && redisClient.isReady) {
+                try {
+                    const translatedReview = await translateReviewFields(review, 'AR', 'EN');
+                    await redisClient.setEx(cacheKeys.reviewAr(review.id), AR_CACHE_EXPIRATION, JSON.stringify(translatedReview));
+                    console.log(`✅ Cached review ${review.id} in Arabic individually`);
+                } catch (cacheError) {
+                    console.error(`Failed to cache review ${review.id} individually:`, cacheError);
+                }
             }
 
             const immediateResponse = lang === 'ar' ? {
@@ -267,12 +429,99 @@ const reviewService = {
                     if (redisClient.isReady) {
                         const keysToDel = [
                             cacheKeys.userReviewsAr(user.uid),
-                            cacheKeys.listingReviewsAr(listingId),
-                            cacheKeys.listingAr(listingId)
+                            cacheKeys.listingReviewsAr(booked.listingId),
+                            cacheKeys.listingAr(booked.listingId),
+                            cacheKeys.userBookingsAr(user.uid)
                         ];
                         const allReviewsKeys = await redisClient.keys(cacheKeys.allReviewsAr('*'));
                         if (allReviewsKeys.length) keysToDel.push(...allReviewsKeys);
                         if (keysToDel.length > 0) await redisClient.del(keysToDel);
+
+                        // Re-fetch and cache the complete review with all relationships for Arabic
+                        if (deeplClient) {
+                            const reviewWithIncludes = await prisma.review.findUnique({
+                                where: { id: review.id },
+                                include: { 
+                                    user: { select: { uid: true, fname: true, lname: true } }, 
+                                    listing: { select: { name: true, id: true, description: true, agegroup: true, location: true, facilities: true, operatingHours: true } },
+                                    booking: { select: { id: true, bookingDate: true, additionalNote: true, ageGroup: true, status: true, booking_hours: true, paymentMethod: true } }
+                                }
+                            });
+
+                            if (reviewWithIncludes) {
+                                const translatedReview = await translateReviewFields(reviewWithIncludes, 'AR', 'EN');
+                                await redisClient.setEx(cacheKeys.reviewAr(review.id), AR_CACHE_EXPIRATION, JSON.stringify(translatedReview));
+                                console.log(`✅ Re-cached complete review ${review.id} in Arabic individually with all relationships`);
+                            }
+                        }
+                        
+                        // Update booking cache if exists
+                        if (bookingId && deeplClient) {
+                            const updatedBooking = await prisma.booking.findUnique({
+                                where: { id: bookingId },
+                                include: { 
+                                    user: { select: { id: true, fname: true, lname: true, email: true } }, 
+                                    listing: true, 
+                                    review: { select: { id: true, rating: true, comment: true, createdAt: true } }, 
+                                    reward: true 
+                                }
+                            });
+                            
+                            if (updatedBooking) {
+                                const translatedBooking = await translateBookingFields(updatedBooking, 'AR', 'EN');
+                                await redisClient.setEx(cacheKeys.bookingAr(bookingId), AR_CACHE_EXPIRATION, JSON.stringify(translatedBooking));
+                            }
+                        }
+
+                        // Update listing cache to reflect new review
+                        const currentListing = await prisma.listing.findUnique({
+                            where: { id: booked.listingId },
+                            include: {
+                                selectedMainCategories: true,
+                                selectedSubCategories: true,
+                                selectedSpecificItems: true,
+                                reviews: {
+                                    where: { status: 'ACCEPTED' },
+                                    select: { rating: true, comment: true, createdAt: true, user: { select: { fname: true, lname: true } } }
+                                },
+                                bookings: {
+                                    select: { 
+                                        id: true, status: true, createdAt: true, 
+                                        user: { select: { fname: true, lname: true } }, 
+                                        bookingDate: true, booking_hours: true, additionalNote: true, 
+                                        ageGroup: true, numberOfPersons: true, paymentMethod: true 
+                                    },
+                                }
+                            }
+                        });
+
+                        if (currentListing && deeplClient) {
+                            const acceptedReviews = currentListing.reviews;
+                            const totalReviews = acceptedReviews.length;
+                            const averageRating = totalReviews > 0
+                                ? acceptedReviews.reduce((sum, review) => sum + review.rating, 0) / totalReviews
+                                : 0;
+
+                            const ratingDistribution = {
+                                5: acceptedReviews.filter(r => r.rating === 5).length,
+                                4: acceptedReviews.filter(r => r.rating === 4).length,
+                                3: acceptedReviews.filter(r => r.rating === 3).length,
+                                2: acceptedReviews.filter(r => r.rating === 2).length,
+                                1: acceptedReviews.filter(r => r.rating === 1).length
+                            };
+
+                            const listingWithStats = {
+                                ...currentListing,
+                                averageRating: Math.round(averageRating * 10) / 10,
+                                totalReviews,
+                                ratingDistribution,
+                                totalBookings: currentListing.bookings.length,
+                                confirmedBookings: currentListing.bookings.filter(b => b.status === 'CONFIRMED').length
+                            };
+                            
+                            const translatedListing = await translateListingFields(listingWithStats, "AR", "EN");
+                            await redisClient.setEx(cacheKeys.listingAr(booked.listingId), AR_CACHE_EXPIRATION, JSON.stringify(translatedListing));
+                        }
                     }
 
                     recordAuditLog(AuditLogAction.GENERAL_CREATE, {
@@ -304,19 +553,7 @@ const reviewService = {
             const pageNum = parseInt(page);
             const limitNum = parseInt(limit);
             const skip = (pageNum - 1) * limitNum;
-            const filterHash = createFilterHash({ ...restFilters, page: pageNum, limit: limitNum });
-            const cacheKey = cacheKeys.allReviewsAr(filterHash);
 
-            // Check cache first
-            if (lang === 'ar' && redisClient.isReady) {
-                const cachedData = await redisClient.get(cacheKey);
-                if (cachedData) {
-                    const parsed = JSON.parse(cachedData);
-                    console.log('Returning cached reviews:', parsed.reviews.length);
-                    return parsed;
-                }
-            }
-            
             // Build where clause from filters
             const whereClause = {
                 ...(restFilters.status && { status: restFilters.status }),
@@ -324,15 +561,11 @@ const reviewService = {
                 ...(restFilters.rating && { rating: parseInt(restFilters.rating) }),
             };
 
-            // Get data from database
-            const [reviews, total] = await prisma.$transaction([
+            // Get review IDs from database first
+            const [reviewIds, total] = await prisma.$transaction([
                 prisma.review.findMany({
                     where: whereClause,
-                    include: { 
-                        user: { select: { uid: true, fname: true, lname: true } }, 
-                        listing: { select: { name: true, id: true } },
-                        booking: { select: { id: true, bookingDate: true } }
-                    },
+                    select: { id: true },
                     orderBy: { createdAt: 'desc' },
                     skip,
                     take: limitNum
@@ -340,42 +573,74 @@ const reviewService = {
                 prisma.review.count({ where: whereClause })
             ]);
 
-            console.log('Database reviews found:', reviews.length);
+            console.log('Database review IDs found:', reviewIds.length);
 
-            let result = {
-                reviews,
-                pagination: { total, page: pageNum, limit: limitNum, totalPages: Math.ceil(total / limitNum) }
-            };
-
-            // Translate if Arabic and deeplClient is available
-            if (lang === 'ar' && deeplClient) {
-                result.reviews = await Promise.all(reviews.map(async (review) => {
-                    const translatedReview = { ...review };
-                    
-                    // Translate review fields
-                    if (review.comment) {
-                        translatedReview.comment = await translateText(review.comment, 'AR', 'EN');
-                    }
-                    if (review.status) {
-                        translatedReview.status = await translateText(review.status, 'AR', 'EN');
-                    }
-                    
-                    // Translate listing name if present
-                    if (review.listing && review.listing.name) {
-                        translatedReview.listing = {
-                            ...review.listing,
-                            name: await translateText(review.listing.name, 'AR', 'EN')
-                        };
-                    }
-                    
-                    return translatedReview;
-                }));
-                
-                // Cache translated results
-                if (redisClient.isReady) await redisClient.setEx(cacheKey, AR_CACHE_EXPIRATION, JSON.stringify(result));
+            if (reviewIds.length === 0) {
+                return {
+                    reviews: [],
+                    pagination: { total: 0, page: pageNum, limit: limitNum, totalPages: 0 },
+                    message: lang === 'ar' ? 'لا توجد تقييمات متاحة' : 'No reviews available'
+                };
             }
 
-            return result;
+            const reviews = [];
+            const missingReviewIds = [];
+
+            // Try to get each review from individual cache entries
+            if (lang === 'ar' && redisClient.isReady) {
+                for (const { id } of reviewIds) {
+                    const cacheKey = cacheKeys.reviewAr(id);
+                    const cachedReview = await redisClient.get(cacheKey);
+                    
+                    if (cachedReview) {
+                        reviews.push(JSON.parse(cachedReview));
+                    } else {
+                        missingReviewIds.push(id);
+                    }
+                }
+                console.log(`Found ${reviews.length} cached reviews, ${missingReviewIds.length} missing from cache`);
+            } else {
+                missingReviewIds.push(...reviewIds.map(r => r.id));
+            }
+
+            // Fetch missing reviews from database
+            if (missingReviewIds.length > 0) {
+                const missingReviews = await prisma.review.findMany({
+                    where: { id: { in: missingReviewIds } },
+                    include: { 
+                        user: { select: { uid: true, fname: true, lname: true } }, 
+                        listing: { select: { name: true, id: true, description: true, agegroup: true, location: true, facilities: true, operatingHours: true } },
+                        booking: { select: { id: true, bookingDate: true, additionalNote: true, ageGroup: true, status: true, booking_hours: true, paymentMethod: true } }
+                    },
+                    orderBy: { createdAt: 'desc' }
+                });
+
+                // Process missing reviews (translate if needed and cache individually)
+                for (const review of missingReviews) {
+                    let processedReview = review;
+
+                    if (lang === 'ar' && deeplClient) {
+                        const translatedReview = await translateReviewFields(review, 'AR', 'EN');
+                        processedReview = translatedReview;
+
+                        // Cache the translated review individually
+                        if (redisClient.isReady) {
+                            const cacheKey = cacheKeys.reviewAr(review.id);
+                            await redisClient.setEx(cacheKey, AR_CACHE_EXPIRATION, JSON.stringify(translatedReview));
+                        }
+                    }
+
+                    reviews.push(processedReview);
+                }
+            }
+
+            // Sort reviews to maintain original order (by creation date desc)
+            const sortedReviews = reviews.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+            return {
+                reviews: sortedReviews,
+                pagination: { total, page: pageNum, limit: limitNum, totalPages: Math.ceil(total / limitNum) }
+            };
         } catch (error) {
             console.error(`Failed to get all reviews: ${error.message}`);
             throw new Error(`Failed to get all reviews: ${error.message}`);
@@ -397,31 +662,15 @@ const reviewService = {
                 where: { id: reviewId },
                 include: { 
                     user: { select: { uid: true, fname: true, lname: true } }, 
-                    listing: { select: { name: true, id: true } },
-                    booking: { select: { id: true, bookingDate: true } }
+                    listing: { select: { name: true, id: true, description: true, agegroup: true, location: true, facilities: true, operatingHours: true } },
+                    booking: { select: { id: true, bookingDate: true, additionalNote: true, ageGroup: true, status: true, booking_hours: true, paymentMethod: true } }
                 }
             });
 
             if (!review) return null;
 
             if (lang === 'ar' && deeplClient) {
-                const translatedReview = { ...review };
-                
-                // Translate review fields
-                if (review.comment) {
-                    translatedReview.comment = await translateText(review.comment, 'AR', 'EN');
-                }
-                if (review.status) {
-                    translatedReview.status = await translateText(review.status, 'AR', 'EN');
-                }
-                
-                // Translate listing name if present
-                if (review.listing && review.listing.name) {
-                    translatedReview.listing = {
-                        ...review.listing,
-                        name: await translateText(review.listing.name, 'AR', 'EN')
-                    };
-                }
+                const translatedReview = await translateReviewFields(review, 'AR', 'EN');
                 
                 if (redisClient.isReady) await redisClient.setEx(cacheKey, AR_CACHE_EXPIRATION, JSON.stringify(translatedReview));
                 return translatedReview;
@@ -447,34 +696,14 @@ const reviewService = {
             const reviews = await prisma.review.findMany({
                 where: { user: { uid: uid } },
                 include: { 
-                    listing: { select: { name: true, id: true } },
-                    booking: { select: { id: true, bookingDate: true } }
+                    listing: { select: { name: true, id: true, description: true, agegroup: true, location: true, facilities: true, operatingHours: true } },
+                    booking: { select: { id: true, bookingDate: true, additionalNote: true, ageGroup: true, status: true, booking_hours: true, paymentMethod: true } }
                 },
                 orderBy: { createdAt: 'desc' }
             });
 
             if (lang === 'ar' && deeplClient) {
-                const translatedReviews = await Promise.all(reviews.map(async (review) => {
-                    const translatedReview = { ...review };
-                    
-                    // Translate review fields
-                    if (review.comment) {
-                        translatedReview.comment = await translateText(review.comment, 'AR', 'EN');
-                    }
-                    if (review.status) {
-                        translatedReview.status = await translateText(review.status, 'AR', 'EN');
-                    }
-                    
-                    // Translate listing name if present
-                    if (review.listing && review.listing.name) {
-                        translatedReview.listing = {
-                            ...review.listing,
-                            name: await translateText(review.listing.name, 'AR', 'EN')
-                        };
-                    }
-                    
-                    return translatedReview;
-                }));
+                const translatedReviews = await Promise.all(reviews.map(review => translateReviewFields(review, 'AR', 'EN')));
                 
                 if (redisClient.isReady) await redisClient.setEx(cacheKey, AR_CACHE_EXPIRATION, JSON.stringify(translatedReviews));
                 return translatedReviews;
@@ -487,10 +716,11 @@ const reviewService = {
         }
     },
 
-    // 5. Update Review (Only rating and comment can be edited by users)
+    // 5. Update Review
     async updateReview(id, data, userUid, lang = 'en', reqDetails = {}) {
         try {
             const reviewId = parseInt(id);
+            console.log(lang);
             const currentReview = await prisma.review.findUnique({
                 where: { id: reviewId },
                 include: { 
@@ -505,13 +735,23 @@ const reviewService = {
             if (userUid && currentReview.user.uid !== userUid) {
                 throw new Error('You can only edit your own reviews');
             }
-
+            console.log(data);
+            
+            // Status translation mapping for Arabic to English
+            const statusTranslationMap = {
+                'مقبول': 'ACCEPTED',
+                'مرفوض': 'REJECTED', 
+                'قيد المراجعة': 'PENDING',
+                'معلق': 'PENDING'
+            };
+            
             // Only allow editing rating and comment for regular users
             let updateData = {};
             if (data.rating !== undefined) updateData.rating = parseInt(data.rating);
             if (data.comment !== undefined) {
                 if (lang === 'ar' && deeplClient) {
                     updateData.comment = await translateText(data.comment, 'EN-US', 'AR');
+                    updateData.status = 'PENDING'; // Reset status to pending on comment update
                 } else {
                     updateData.comment = data.comment;
                 }
@@ -519,7 +759,12 @@ const reviewService = {
 
             // Admin can update status
             if (data.status !== undefined && !userUid) {
-                updateData.status = data.status.toUpperCase();
+                if(lang === 'ar' && data.status in statusTranslationMap) {
+                    updateData.status = statusTranslationMap[data.status];
+                } else {
+                    updateData.status = data.status.toUpperCase();
+                }
+                console.log(updateData.status);
             }
 
             const updatedReview = await prisma.review.update({
@@ -527,18 +772,23 @@ const reviewService = {
                 data: updateData,
                 include: { 
                     user: { select: { uid: true, fname: true, lname: true } }, 
-                    listing: { select: { name: true, id: true } },
-                    booking: { select: { id: true, bookingDate: true } }
+                    listing: { select: { name: true, id: true, description: true, agegroup: true, location: true, facilities: true, operatingHours: true } },
+                    booking: { select: { id: true, bookingDate: true, additionalNote: true, ageGroup: true, status: true, booking_hours: true, paymentMethod: true } }
                 }
             });
+
+            // Return immediately with translated response if needed
+            const immediateResponse = lang === 'ar' && deeplClient ? 
+                await translateReviewFields(updatedReview, 'AR', 'EN') : 
+                updatedReview;
 
             setImmediate(async () => {
                 try {
                     // Send notification for status updates (admin action)
                     if (data.status && data.status !== currentReview.status) {
-                        const statusMessage = data.status === 'ACCEPTED' ? 
+                        const statusMessage = updateData.status === 'ACCEPTED' ? 
                             `Your review for ${currentReview.listing.name} has been approved and is now live.` :
-                            `Your review for ${currentReview.listing.name} has been ${data.status.toLowerCase()}.`;
+                            `Your review for ${currentReview.listing.name} has been ${updateData.status.toLowerCase()}.`;
                         
                         await prisma.notification.create({
                             data: {
@@ -557,7 +807,7 @@ const reviewService = {
                         await sendMail(currentReview.user.email, emailSubject, emailMessage, 'en', {
                             name: currentReview.user.fname || 'Customer',
                             listingName: currentReview.listing.name,
-                            status: data.status
+                            status: updateData.status
                         });
                     }
 
@@ -567,65 +817,120 @@ const reviewService = {
                             cacheKeys.reviewAr(reviewId),
                             cacheKeys.userReviewsAr(currentReview.user.uid),
                             cacheKeys.listingReviewsAr(currentReview.listingId),
-                            cacheKeys.listingAr(currentReview.listingId)
+                            cacheKeys.listingAr(currentReview.listingId),
+                            cacheKeys.userBookingsAr(currentReview.user.uid)
                         ];
+                        
+                        // Clear all reviews cache
                         const allReviewsKeys = await redisClient.keys(cacheKeys.allReviewsAr('*'));
                         if (allReviewsKeys.length) keysToDel.push(...allReviewsKeys);
+                        
                         if (keysToDel.length > 0) await redisClient.del(keysToDel);
 
-                        // Update listing cache if status changed to accepted/rejected
-                        if (data.status && data.status !== currentReview.status) {
-                            const listingCacheKey = cacheKeys.listingAr(currentReview.listingId);
-                            await redisClient.del(listingCacheKey);
-                            
-                            // Refresh listing cache with new review data
-                            const currentListing = await prisma.listing.findUnique({
-                                where: { id: currentReview.listingId },
-                                include: {
-                                    selectedMainCategories: true,
-                                    selectedSubCategories: true,
-                                    selectedSpecificItems: true,
-                                    reviews: {
-                                        where: { status: 'ACCEPTED' },
-                                        select: { rating: true, comment: true, createdAt: true, user: { select: { fname: true, lname: true } } }
-                                    },
-                                    bookings: {
-                                        select: { 
-                                            id: true, status: true, createdAt: true, 
-                                            user: { select: { fname: true, lname: true } }, 
-                                            bookingDate: true, booking_hours: true, additionalNote: true, 
-                                            ageGroup: true, numberOfPersons: true, paymentMethod: true 
-                                        },
-                                    }
+                        // Update individual review cache
+                        if (deeplClient) {
+                            const translatedReview = await translateReviewFields(updatedReview, 'AR', 'EN');
+                            await redisClient.setEx(cacheKeys.reviewAr(reviewId), AR_CACHE_EXPIRATION, JSON.stringify(translatedReview));
+                        }
+
+                        // Update booking cache if review is linked to a booking
+                        if (updatedReview.booking) {
+                            const bookingWithReview = await prisma.booking.findUnique({
+                                where: { id: updatedReview.booking.id },
+                                include: { 
+                                    user: { select: { id: true, fname: true, lname: true, email: true } }, 
+                                    listing: true, 
+                                    review: { select: { id: true, rating: true, comment: true, createdAt: true } }, 
+                                    reward: true 
                                 }
                             });
+                            
+                            if (bookingWithReview && deeplClient) {
+                                const translatedBooking = await translateBookingFields(bookingWithReview, 'AR', 'EN');
+                                await redisClient.setEx(cacheKeys.bookingAr(updatedReview.booking.id), AR_CACHE_EXPIRATION, JSON.stringify(translatedBooking));
+                            }
+                        }
 
-                            if (currentListing && deeplClient) {
-                                const acceptedReviews = currentListing.reviews;
-                                const totalReviews = acceptedReviews.length;
-                                const averageRating = totalReviews > 0
-                                    ? acceptedReviews.reduce((sum, review) => sum + review.rating, 0) / totalReviews
-                                    : 0;
+                        // Update listing cache to reflect review changes
+                        const currentListing = await prisma.listing.findUnique({
+                            where: { id: currentReview.listingId },
+                            include: {
+                                selectedMainCategories: true,
+                                selectedSubCategories: true,
+                                selectedSpecificItems: true,
+                                reviews: {
+                                    where: { status: 'ACCEPTED' },
+                                    select: { rating: true, comment: true, createdAt: true, user: { select: { fname: true, lname: true } } }
+                                },
+                                bookings: {
+                                    select: { 
+                                        id: true, status: true, createdAt: true, 
+                                        user: { select: { fname: true, lname: true } }, 
+                                        bookingDate: true, booking_hours: true, additionalNote: true, 
+                                        ageGroup: true, numberOfPersons: true, paymentMethod: true 
+                                    },
+                                }
+                            }
+                        });
 
-                                const ratingDistribution = {
-                                    5: acceptedReviews.filter(r => r.rating === 5).length,
-                                    4: acceptedReviews.filter(r => r.rating === 4).length,
-                                    3: acceptedReviews.filter(r => r.rating === 3).length,
-                                    2: acceptedReviews.filter(r => r.rating === 2).length,
-                                    1: acceptedReviews.filter(r => r.rating === 1).length
-                                };
+                        if (currentListing && deeplClient) {
+                            const acceptedReviews = currentListing.reviews;
+                            const totalReviews = acceptedReviews.length;
+                            const averageRating = totalReviews > 0
+                                ? acceptedReviews.reduce((sum, review) => sum + review.rating, 0) / totalReviews
+                                : 0;
 
-                                const listingWithStats = {
-                                    ...currentListing,
-                                    averageRating: Math.round(averageRating * 10) / 10,
-                                    totalReviews,
-                                    ratingDistribution,
-                                    totalBookings: currentListing.bookings.length,
-                                    confirmedBookings: currentListing.bookings.filter(b => b.status === 'CONFIRMED').length
-                                };
-                                
-                                const translatedListing = await translateListingFields(listingWithStats, "AR", "EN");
-                                await redisClient.setEx(listingCacheKey, AR_CACHE_EXPIRATION, JSON.stringify(translatedListing));
+                            const ratingDistribution = {
+                                5: acceptedReviews.filter(r => r.rating === 5).length,
+                                4: acceptedReviews.filter(r => r.rating === 4).length,
+                                3: acceptedReviews.filter(r => r.rating === 3).length,
+                                2: acceptedReviews.filter(r => r.rating === 2).length,
+                                1: acceptedReviews.filter(r => r.rating === 1).length
+                            };
+
+                            const listingWithStats = {
+                                ...currentListing,
+                                averageRating: Math.round(averageRating * 10) / 10,
+                                totalReviews,
+                                ratingDistribution,
+                                totalBookings: currentListing.bookings.length,
+                                confirmedBookings: currentListing.bookings.filter(b => b.status === 'CONFIRMED').length
+                            };
+                            
+                            const translatedListing = await translateListingFields(listingWithStats, "AR", "EN");
+                            await redisClient.setEx(cacheKeys.listingAr(currentReview.listingId), AR_CACHE_EXPIRATION, JSON.stringify(translatedListing));
+                        }
+
+                        // Update user reviews cache
+                        const userReviews = await prisma.review.findMany({
+                            where: { user: { uid: currentReview.user.uid } },
+                            include: { 
+                                listing: { select: { name: true, id: true, description: true, agegroup: true, location: true, facilities: true, operatingHours: true } },
+                                booking: { select: { id: true, bookingDate: true, additionalNote: true, ageGroup: true, status: true, booking_hours: true, paymentMethod: true } }
+                            },
+                            orderBy: { createdAt: 'desc' }
+                        });
+
+                        if (userReviews.length > 0 && deeplClient) {
+                            const translatedUserReviews = await Promise.all(
+                                userReviews.map(r => translateReviewFields(r, 'AR', 'EN'))
+                            );
+                            await redisClient.setEx(cacheKeys.userReviewsAr(currentReview.user.uid), AR_CACHE_EXPIRATION, JSON.stringify(translatedUserReviews));
+                        }
+
+                        // Update user bookings cache if review affects booking
+                        if (updatedReview.booking) {
+                            const userBookings = await prisma.booking.findMany({
+                                where: { user: { uid: currentReview.user.uid } },
+                                include: { listing: true, review: true, reward: true },
+                                orderBy: { createdAt: 'desc' }
+                            });
+
+                            if (userBookings.length > 0 && deeplClient) {
+                                const translatedUserBookings = await Promise.all(
+                                    userBookings.map(b => translateBookingFields(b, 'AR', 'EN'))
+                                );
+                                await redisClient.setEx(cacheKeys.userBookingsAr(currentReview.user.uid), AR_CACHE_EXPIRATION, JSON.stringify(translatedUserBookings));
                             }
                         }
                     }
@@ -646,26 +951,7 @@ const reviewService = {
                 }
             });
 
-            if (lang === 'ar' && deeplClient) {
-                const translatedReview = { ...updatedReview };
-                
-                if (updatedReview.comment) {
-                    translatedReview.comment = await translateText(updatedReview.comment, 'AR', 'EN');
-                }
-                if (updatedReview.status) {
-                    translatedReview.status = await translateText(updatedReview.status, 'AR', 'EN');
-                }
-                if (updatedReview.listing && updatedReview.listing.name) {
-                    translatedReview.listing = {
-                        ...updatedReview.listing,
-                        name: await translateText(updatedReview.listing.name, 'AR', 'EN')
-                    };
-                }
-                
-                return translatedReview;
-            }
-            
-            return updatedReview;
+            return immediateResponse;
         } catch (error) {
             console.error(`Failed to update review ${id}: ${error.message}`);
             throw new Error(`Failed to update review ${id}: ${error.message}`);
@@ -705,67 +991,17 @@ const reviewService = {
                             cacheKeys.reviewAr(reviewId),
                             cacheKeys.userReviewsAr(reviewToDelete.user.uid),
                             cacheKeys.listingReviewsAr(reviewToDelete.listingId),
-                            cacheKeys.listingAr(reviewToDelete.listingId)
+                            cacheKeys.listingAr(reviewToDelete.listingId),
+                            cacheKeys.userBookingsAr(reviewToDelete.user.uid)
                         ];
+                        
+                        if (reviewToDelete.booking) {
+                            keysToDel.push(cacheKeys.bookingAr(reviewToDelete.booking.id));
+                        }
+                        
                         const allReviewsKeys = await redisClient.keys(cacheKeys.allReviewsAr('*'));
                         if (allReviewsKeys.length) keysToDel.push(...allReviewsKeys);
                         if (keysToDel.length > 0) await redisClient.del(keysToDel);
-
-                        // Update listing cache after review deletion
-                        if (reviewToDelete.listingId && deeplClient) {
-                            const listingCacheKey = cacheKeys.listingAr(reviewToDelete.listingId);
-                            await redisClient.del(listingCacheKey);
-                            
-                            // Refresh listing cache
-                            const currentListing = await prisma.listing.findUnique({
-                                where: { id: reviewToDelete.listingId },
-                                include: {
-                                    selectedMainCategories: true,
-                                    selectedSubCategories: true,
-                                    selectedSpecificItems: true,
-                                    reviews: {
-                                        where: { status: 'ACCEPTED' },
-                                        select: { rating: true, comment: true, createdAt: true, user: { select: { fname: true, lname: true } } }
-                                    },
-                                    bookings: {
-                                        select: { 
-                                            id: true, status: true, createdAt: true, 
-                                            user: { select: { fname: true, lname: true } }, 
-                                            bookingDate: true, booking_hours: true, additionalNote: true, 
-                                            ageGroup: true, numberOfPersons: true, paymentMethod: true 
-                                        },
-                                    }
-                                }
-                            });
-
-                            if (currentListing) {
-                                const acceptedReviews = currentListing.reviews;
-                                const totalReviews = acceptedReviews.length;
-                                const averageRating = totalReviews > 0
-                                    ? acceptedReviews.reduce((sum, review) => sum + review.rating, 0) / totalReviews
-                                    : 0;
-
-                                const ratingDistribution = {
-                                    5: acceptedReviews.filter(r => r.rating === 5).length,
-                                    4: acceptedReviews.filter(r => r.rating === 4).length,
-                                    3: acceptedReviews.filter(r => r.rating === 3).length,
-                                    2: acceptedReviews.filter(r => r.rating === 2).length,
-                                    1: acceptedReviews.filter(r => r.rating === 1).length
-                                };
-
-                                const listingWithStats = {
-                                    ...currentListing,
-                                    averageRating: Math.round(averageRating * 10) / 10,
-                                    totalReviews,
-                                    ratingDistribution,
-                                    totalBookings: currentListing.bookings.length,
-                                    confirmedBookings: currentListing.bookings.filter(b => b.status === 'CONFIRMED').length
-                                };
-                                
-                                const translatedListing = await translateListingFields(listingWithStats, "AR", "EN");
-                                await redisClient.setEx(listingCacheKey, AR_CACHE_EXPIRATION, JSON.stringify(translatedListing));
-                            }
-                        }
                     }
 
                     recordAuditLog(AuditLogAction.GENERAL_DELETE, {

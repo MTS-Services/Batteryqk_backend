@@ -9,6 +9,58 @@ import * as deepl from "deepl-node";
 import { sendMail } from '../utils/mailer.js';
 import axios from 'axios';
 import FormData from 'form-data';
+import pLimit from 'p-limit';
+
+
+const translationCache = new Map();
+const limit = pLimit(5); // Limit concurrent translations to 5
+function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+async function translateText(text, targetLang, sourceLang = null) {
+    if (!deeplClient) {
+        console.warn("DeepL client is not initialized.");
+        return text;
+    }
+
+    if (!text || typeof text !== 'string') {
+        return text;
+    }
+
+    const cacheKey = `${text}::${sourceLang || 'auto'}::${targetLang}`;
+    if (translationCache.has(cacheKey)) {
+        return translationCache.get(cacheKey);
+    }
+
+    try {
+        const result = await limit(async () => {
+            let retries = 3;
+            while (retries > 0) {
+                try {
+                    const res = await deeplClient.translateText(text, sourceLang, targetLang);
+                    return res;
+                } catch (err) {
+                    if (err.message.includes("Too many requests")) {
+                        console.warn("DeepL rate limit hit, retrying in 100ms...");
+                        await delay(100);
+                        retries--;
+                    } else {
+                        throw err;
+                    }
+                }
+            }
+            throw new Error("Failed after multiple retries due to rate limits.");
+        });
+
+        console.log(`Translated: "${text}" => "${result.text}"`);
+        translationCache.set(cacheKey, result.text);
+        return result.text;
+
+    } catch (error) {
+        console.error(`DeepL Translation error: ${error.message}`);
+        return text; // fallback
+    }
+}
 
 // --- DeepL Configuration ---
 const DEEPL_AUTH_KEY = process.env.DEEPL_AUTH_KEY || "YOUR_DEEPL_AUTH_KEY_HERE";
@@ -42,31 +94,126 @@ redisClient.on('error', (err) => console.error('Redis: Listing Cache - Error ->'
 })();
 
 const cacheKeys = {
+     bookingAr: (bookingId) => `booking:${bookingId}:ar`,
+    userBookingsAr: (uid) => `user:${uid}:bookings:ar`,
     listingAr: (listingId) => `listing:${listingId}:ar`,
     allListingsAr: (filterHash = '') => `listings:all${filterHash}:ar`,
+    reviewAr: (reviewId) => `review:${reviewId}:ar`,
+    userReviewsAr: (uid) => `user:${uid}:reviews:ar`,
+
 };
-
-// --- Helper Functions ---
-async function translateText(text, targetLang, sourceLang = null) {
-    if (!deeplClient) {
-        console.warn("DeepL client is not initialized.");
-        return text;
+async function translateReviewFields(review, targetLang, sourceLang = null) {
+    if (!review) return review;
+    
+    const translatedReview = { ...review };
+    
+    // Translate review fields
+    if (review.comment) {
+        translatedReview.comment = await translateText(review.comment, targetLang, sourceLang);
     }
-
-    if (!text || typeof text !== 'string') {
-        return text;
+    if (review.status) {
+        translatedReview.status = await translateText(review.status, targetLang, sourceLang);
     }
-
-    try {
-        const result = await deeplClient.translateText(text, sourceLang, targetLang);
-        console.log(`Translated: "${text}" => "${result.text}"`);
-        return result.text;
-    } catch (error) {
-        console.error(`DeepL Translation error: ${error.message}`);
-        return text;
+    
+    // Translate user fields if present
+    if (review.user) {
+        translatedReview.user = {
+            ...review.user,
+            fname: await translateText(review.user.fname, targetLang, sourceLang),
+            lname: await translateText(review.user.lname, targetLang, sourceLang)
+        };
     }
+    
+    // Translate listing fields if present
+    if (review.listing) {
+        translatedReview.listing = {
+            ...review.listing,
+            name: await translateText(review.listing.name, targetLang, sourceLang),
+            description: review.listing.description ? await translateText(review.listing.description, targetLang, sourceLang) : null,
+            agegroup: review.listing.agegroup ? await translateArrayFields(review.listing.agegroup, targetLang, sourceLang) : [],
+            location: review.listing.location ? await translateArrayFields(review.listing.location, targetLang, sourceLang) : [],
+            facilities: review.listing.facilities ? await translateArrayFields(review.listing.facilities, targetLang, sourceLang) : [],
+            operatingHours: review.listing.operatingHours ? await translateArrayFields(review.listing.operatingHours, targetLang, sourceLang) : [],
+        };
+    }
+    
+    // Translate booking fields if present
+    if (review.booking) {
+        translatedReview.booking = {
+            ...review.booking,
+            additionalNote: review.booking.additionalNote ? await translateText(review.booking.additionalNote, targetLang, sourceLang) : null,
+            ageGroup: review.booking.ageGroup ? await translateText(review.booking.ageGroup, targetLang, sourceLang) : null,
+            status: review.booking.status ? await translateText(review.booking.status, targetLang, sourceLang) : null,
+            booking_hours: review.booking.booking_hours ? await translateText(review.booking.booking_hours, targetLang, sourceLang) : null,
+            paymentMethod: review.booking.paymentMethod ? await translateText(review.booking.paymentMethod, targetLang, sourceLang) : null
+        };
+    }
+    
+    return translatedReview;
 }
 
+async function translateBookingFields(booking, targetLang, sourceLang = null) {
+    console.log(`Translating booking fields to ${booking}...`);
+    if (!booking) return booking;
+    const translatedBooking = { ...booking };
+    if (booking.additionalNote) {
+        translatedBooking.additionalNote = await translateText(booking.additionalNote, targetLang, sourceLang);
+    }
+    if (booking.ageGroup) {
+        translatedBooking.ageGroup = await translateText(booking.ageGroup, targetLang, sourceLang);
+    }
+    if (booking.status) {
+        translatedBooking.status = await translateText(booking.status, targetLang, sourceLang);
+    }
+    if (booking.booking_hours) {
+        translatedBooking.booking_hours = await translateText(booking.booking_hours, targetLang, sourceLang
+        );
+    }
+    if (booking.paymentMethod) {
+        translatedBooking.paymentMethod = await translateText(booking.paymentMethod, targetLang, sourceLang
+        );
+    }
+    if (booking.user) {
+        console.log(`Translating user fields for booking ${booking.id}...`);
+        // DO NOT translate user's proper names. Preserve them.
+        console.log(`Translating user name for booking ${booking.user.name}...`);
+        console.log(`Translating user fname ${booking.user.fname} and lname ${booking.user.lname}...`);
+        translatedBooking.user = {
+            ...booking.user,
+            fname: await translateText(booking.user.fname, targetLang, sourceLang),
+            lname: await translateText(booking.user.lname, targetLang, sourceLang),
+           
+        };
+    }
+    if (booking.listing) {
+        translatedBooking.listing = {
+            ...booking.listing,
+            name: await translateText(booking.listing.name, targetLang, sourceLang),
+            description: await translateText(booking.listing.description, targetLang, sourceLang),
+            facilities: booking.listing.facilities ? await Promise.all(booking.listing.facilities.map(f => translateText(f, targetLang, sourceLang))) : [],
+            location: booking.listing.location ? await Promise.all(booking.listing.location.map(l => translateText(l, targetLang, sourceLang))) : [],
+            agegroup: booking.listing.agegroup ? await Promise.all(booking.listing.agegroup.map(a => translateText(a, targetLang, sourceLang))) : [],
+            operatingHours: booking.listing.operatingHours ? await Promise.all(booking.listing.operatingHours.map(o => translateText(o, targetLang, sourceLang))) : [],
+
+        };
+    }
+    if (booking.review) {
+        translatedBooking.review = {
+            ...booking.review,
+            status: await translateText(booking.review.status, targetLang, sourceLang),
+            comment: await translateText(booking.review.comment, targetLang, sourceLang)
+        };
+    }
+
+    if (booking.reward) {
+        translatedBooking.reward = {
+            ...booking.reward,
+            description: await translateText(booking.reward.description, targetLang, sourceLang),
+            category: await translateText(booking.reward.category, targetLang, sourceLang)
+        };
+    }
+    return translatedBooking;
+}
 
 async function translateArrayFields(arr, targetLang, sourceLang = null) {
     if (!arr || !Array.isArray(arr)) return arr;
@@ -1549,17 +1696,81 @@ async updateListing(id, data, files, lang = "en", reqDetails = {}) {
                 confirmedBookings: finalListing.bookings.filter(b => b.status === 'CONFIRMED').length
             };
 
-            // Clear Redis cache
+            // Clear Redis cache for related entities
             if (redisClient.isReady) {
-                await redisClient.del(cacheKeys.listingAr(listingId));
-                const keys = await redisClient.keys(cacheKeys.allListingsAr('*'));
-                if (keys.length > 0) {
-                    await redisClient.del(keys);
+                const keysToDel = [
+                    cacheKeys.listingAr(listingId),
+                    // Clear all listings cache
+                    ...await redisClient.keys(cacheKeys.allListingsAr('*'))
+                ];
+
+                // Clear booking caches that reference this listing
+                const allBookingKeys = await redisClient.keys(cacheKeys.bookingAr('*'));
+                for (const bookingKey of allBookingKeys) {
+                    try {
+                        const cachedBooking = await redisClient.get(bookingKey);
+                        if (cachedBooking) {
+                            const booking = JSON.parse(cachedBooking);
+                            if (booking.listingId === listingId) {
+                                keysToDel.push(bookingKey);
+                            }
+                        }
+                    } catch (e) {
+                        console.error('Error checking booking cache:', e);
+                    }
                 }
-                console.log(`Redis: AR Cache - Cleared listing ${listingId} cache`);
+
+                // Clear user bookings caches for users who have bookings for this listing
+                const usersWithBookings = await prisma.user.findMany({
+                    where: {
+                        bookings: {
+                            some: { listingId: listingId }
+                        }
+                    },
+                    select: { uid: true }
+                });
+
+                for (const user of usersWithBookings) {
+                    keysToDel.push(cacheKeys.userBookingsAr(user.uid));
+                }
+
+                // Clear review caches that reference this listing
+                const allReviewKeys = await redisClient.keys(cacheKeys.reviewAr('*'));
+                for (const reviewKey of allReviewKeys) {
+                    try {
+                        const cachedReview = await redisClient.get(reviewKey);
+                        if (cachedReview) {
+                            const review = JSON.parse(cachedReview);
+                            if (review.listingId === listingId) {
+                                keysToDel.push(reviewKey);
+                            }
+                        }
+                    } catch (e) {
+                        console.error('Error checking review cache:', e);
+                    }
+                }
+
+                // Clear user reviews caches for users who have reviews for this listing
+                const usersWithReviews = await prisma.user.findMany({
+                    where: {
+                        reviews: {
+                            some: { listingId: listingId }
+                        }
+                    },
+                    select: { uid: true }
+                });
+
+                for (const user of usersWithReviews) {
+                    keysToDel.push(cacheKeys.userReviewsAr(user.uid));
+                }
+
+                if (keysToDel.length > 0) {
+                    await redisClient.del(keysToDel);
+                }
+                console.log(`Redis: AR Cache - Cleared ${keysToDel.length} related cache keys for listing ${listingId}`);
             }
 
-            // Update Arabic cache
+            // Update Arabic cache for the listing
             if (deeplClient && redisClient.isReady) {
                 const translatedListing = await translateListingFields(enhancedFinalListing, "AR", "EN");
                 await redisClient.setEx(
@@ -1568,6 +1779,76 @@ async updateListing(id, data, files, lang = "en", reqDetails = {}) {
                     JSON.stringify(translatedListing)
                 );
                 console.log(`Redis: AR Cache - Updated Arabic cache for listing ${listingId}`);
+
+                // Update booking caches that reference this listing
+                const bookingsForThisListing = await prisma.booking.findMany({
+                    where: { listingId: listingId },
+                    include: { 
+                        user: { select: { id: true, fname: true, lname: true, email: true, uid: true } }, 
+                        listing: true, 
+                        review: { select: { id: true, rating: true, comment: true, createdAt: true } }, 
+                        reward: true 
+                    }
+                });
+
+                for (const booking of bookingsForThisListing) {
+                    try {
+                        const translatedBooking = await translateBookingFields(booking, 'AR', 'EN');
+                        await redisClient.setEx(cacheKeys.bookingAr(booking.id), AR_CACHE_EXPIRATION, JSON.stringify(translatedBooking));
+                        
+                        // Update user bookings cache
+                        if (booking.user.uid) {
+                            const userBookings = await prisma.booking.findMany({
+                                where: { user: { uid: booking.user.uid } },
+                                include: { listing: true, review: true, reward: true },
+                                orderBy: { createdAt: 'desc' }
+                            });
+                            
+                            const translatedUserBookings = await Promise.all(
+                                userBookings.map(b => translateBookingFields(b, 'AR', 'EN'))
+                            );
+                            await redisClient.setEx(cacheKeys.userBookingsAr(booking.user.uid), AR_CACHE_EXPIRATION, JSON.stringify(translatedUserBookings));
+                        }
+                    } catch (e) {
+                        console.error(`Error updating booking cache for booking ${booking.id}:`, e);
+                    }
+                }
+
+                // Update review caches that reference this listing
+                const reviewsForThisListing = await prisma.review.findMany({
+                    where: { listingId: listingId },
+                    include: { 
+                        user: { select: { id: true, fname: true, lname: true,email: true } }, 
+                        listing: { select: {id: true, name: true,  description: true, agegroup: true, location: true, facilities: true, operatingHours: true } },
+                        booking: { select: { id: true, bookingDate: true, additionalNote: true, ageGroup: true, status: true, booking_hours: true, paymentMethod: true } }
+                    }
+                });
+
+                for (const review of reviewsForThisListing) {
+                    try {
+                        const translatedReview = await translateReviewFields(review, 'AR', 'EN');
+                        await redisClient.setEx(cacheKeys.reviewAr(review.id), AR_CACHE_EXPIRATION, JSON.stringify(translatedReview));
+                        
+                        // Update user reviews cache
+                        if (review.user.uid) {
+                            const userReviews = await prisma.review.findMany({
+                                where: { user: { uid: review.user.uid } },
+                                include: { 
+                                    listing: { select: { name: true, id: true, description: true, agegroup: true, location: true, facilities: true, operatingHours: true } },
+                                    booking: { select: { id: true, bookingDate: true, additionalNote: true, ageGroup: true, status: true, booking_hours: true, paymentMethod: true } }
+                                },
+                                orderBy: { createdAt: 'desc' }
+                            });
+                            
+                            const translatedUserReviews = await Promise.all(
+                                userReviews.map(r => translateReviewFields(r, 'AR', 'EN'))
+                            );
+                            await redisClient.setEx(cacheKeys.userReviewsAr(review.user.uid), AR_CACHE_EXPIRATION, JSON.stringify(translatedUserReviews));
+                        }
+                    } catch (e) {
+                        console.error(`Error updating review cache for review ${review.id}:`, e);
+                    }
+                }
             }
 
             // Record audit log

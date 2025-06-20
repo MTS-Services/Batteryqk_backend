@@ -1098,18 +1098,22 @@ const bookingService = {
             throw new Error(`Failed to update booking ${id}: ${error.message}`);
         }
     },
-
     // 6. Delete Booking
     async deleteBooking(id, reqDetails = {}) {
         try {
             const bookingId = parseInt(id);
-            const bookingToDelete = await prisma.booking.findUnique({ where: { id: bookingId }, include: { user: true } });
+            const bookingToDelete = await prisma.booking.findUnique({ 
+                where: { id: bookingId }, 
+                include: { user: true, listing: true, review: true } 
+            });
             if (!bookingToDelete) throw new Error('Booking not found');
 
-            // Concurrently delete related records and the booking itself
+            // Delete related records and the booking itself
             await prisma.$transaction([
                 prisma.reward.deleteMany({ where: { bookingId: bookingId } }),
                 prisma.notification.deleteMany({ where: { entityId: id.toString(), entityType: 'Booking' }}),
+                // Delete review if exists
+                ...(bookingToDelete.review ? [prisma.review.delete({ where: { id: bookingToDelete.review.id } })] : []),
                 prisma.booking.delete({ where: { id: bookingId } })
             ]);
 
@@ -1122,6 +1126,26 @@ const bookingService = {
                     });
                     await updateRewardCategory(bookingToDelete.userId, totalPointsResult._sum.points || 0);
 
+                    // Send email notification for booking deletion
+                    const deletionSubject = 'Booking Cancelled';
+                    const deletionMessage = `Hello ${bookingToDelete.user.fname || 'Customer'},\n\nYour booking for "${bookingToDelete.listing.name}" has been cancelled.\n\nBooking ID: ${bookingId}\nOriginal Booking Date: ${bookingToDelete.bookingDate}`;
+                    await sendMail(bookingToDelete.user.email, deletionSubject, deletionMessage, 'en', {
+                        name: bookingToDelete.user.fname || 'Customer',
+                        listingName: bookingToDelete.listing.name
+                    });
+
+                    // Create notification for booking deletion
+                    await prisma.notification.create({
+                        data: {
+                            userId: bookingToDelete.user.id,
+                            title: 'Booking Cancelled',
+                            message: `Your booking for ${bookingToDelete.listing.name} has been cancelled.`,
+                            type: 'BOOKING',
+                            entityId: bookingId.toString(),
+                            entityType: 'Booking'
+                        }
+                    });
+
                     if (redisClient.isReady) {
                         const keysToDel = [
                             cacheKeys.bookingAr(bookingId), 
@@ -1129,9 +1153,51 @@ const bookingService = {
                             cacheKeys.listingBookingsAr(bookingToDelete.listingId),
                             cacheKeys.userNotificationsAr(bookingToDelete.user.uid)
                         ];
+
+                        // If booking had a review, delete review cache too
+                        if (bookingToDelete.review) {
+                            keysToDel.push(
+                                cacheKeys.reviewAr(bookingToDelete.review.id),
+                                cacheKeys.userReviewsAr(bookingToDelete.user.uid)
+                            );
+                        }
+
                         const allBookingsKeys = await redisClient.keys(cacheKeys.allBookingsAr('*'));
                         if (allBookingsKeys.length) keysToDel.push(...allBookingsKeys);
                         if (keysToDel.length > 0) await redisClient.del(keysToDel);
+
+                        // Update user bookings cache after deletion
+                        const userBookings = await prisma.booking.findMany({
+                            where: { user: { uid: bookingToDelete.user.uid } },
+                            include: { listing: true, review: true, reward: true },
+                            orderBy: { createdAt: 'desc' }
+                        });
+
+                        if (deeplClient) {
+                            const translatedUserBookings = await Promise.all(
+                                userBookings.map(b => translateBookingFields(b, 'AR', 'EN'))
+                            );
+                            await redisClient.setEx(cacheKeys.userBookingsAr(bookingToDelete.user.uid), AR_CACHE_EXPIRATION, JSON.stringify(translatedUserBookings));
+                        }
+
+                        // Update user reviews cache if review was deleted
+                        if (bookingToDelete.review) {
+                            const userReviews = await prisma.review.findMany({
+                                where: { user: { uid: bookingToDelete.user.uid } },
+                                include: { 
+                                    listing: { select: { name: true, id: true, description: true, agegroup: true, location: true, facilities: true, operatingHours: true } },
+                                    booking: { select: { id: true, bookingDate: true, additionalNote: true, ageGroup: true, status: true, booking_hours: true, paymentMethod: true } }
+                                },
+                                orderBy: { createdAt: 'desc' }
+                            });
+
+                            if (deeplClient) {
+                                const translatedUserReviews = await Promise.all(
+                                    userReviews.map(r => translateReviewFields(r, 'AR', 'EN'))
+                                );
+                                await redisClient.setEx(cacheKeys.userReviewsAr(bookingToDelete.user.uid), AR_CACHE_EXPIRATION, JSON.stringify(translatedUserReviews));
+                            }
+                        }
 
                         // Update listing cache after booking deletion
                         if (bookingToDelete.listingId && deeplClient) {
@@ -1194,12 +1260,20 @@ const bookingService = {
             });
 
             recordAuditLog(AuditLogAction.BOOKING_CANCELLED, {
-                userId: reqDetails.actorUserId, entityName: 'Booking', entityId: bookingId.toString(),
-                oldValues: bookingToDelete, description: `Booking ${bookingId} deleted/cancelled.`,
-                ipAddress: reqDetails.ipAddress, userAgent: reqDetails.userAgent,
+                userId: reqDetails.actorUserId, 
+                entityName: 'Booking', 
+                entityId: bookingId.toString(),
+                oldValues: bookingToDelete, 
+                description: `Booking ${bookingId} deleted/cancelled.`,
+                ipAddress: reqDetails.ipAddress, 
+                userAgent: reqDetails.userAgent,
             });
 
-            return { message: `Booking ${bookingId} and related records deleted successfully.`, deletedBookingId: bookingToDelete.id };
+            return { 
+                message: `Booking ${bookingId} and related records deleted successfully.`, 
+                deletedBookingId: bookingToDelete.id,
+                reviewDeleted: !!bookingToDelete.review
+            };
         } catch (error) {
             console.error(`Failed to delete booking ${id}: ${error.message}`);
             throw new Error(`Failed to delete booking ${id}: ${error.message}`);

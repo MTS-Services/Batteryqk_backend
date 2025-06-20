@@ -959,7 +959,7 @@ const reviewService = {
     },
 
     // 6. Delete Review
-    async deleteReview(id, reqDetails = {}) {
+    async deleteReview(id, lang = 'en', reqDetails = {}) {
         try {
             const reviewId = parseInt(id);
             const reviewToDelete = await prisma.review.findUnique({ 
@@ -983,8 +983,44 @@ const reviewService = {
 
             const deletedReview = await prisma.review.delete({ where: { id: reviewId } });
 
+            // Return immediately with translated response if needed
+            const immediateResponse = lang === 'ar' ? {
+                message: 'تم حذف التقييم بنجاح.',
+                deletedReviewId: deletedReview.id
+            } : {
+                message: `Review ${reviewId} deleted successfully.`,
+                deletedReviewId: deletedReview.id
+            };
+
             setImmediate(async () => {
                 try {
+                    // Send notification to user about review deletion
+                    const notificationMessage = lang === 'ar' ? 
+                        `تم حذف تقييمك لـ ${reviewToDelete.listing.name}.` :
+                        `Your review for ${reviewToDelete.listing.name} has been deleted.`;
+                    
+                    await prisma.notification.create({
+                        data: {
+                            userId: reviewToDelete.user.id,
+                            title: lang === 'ar' ? 'تم حذف التقييم' : 'Review Deleted',
+                            message: notificationMessage,
+                            type: 'GENERAL',
+                            entityId: reviewId.toString(),
+                            entityType: 'Review'
+                        }
+                    });
+
+                    // Send email notification
+                    const emailSubject = lang === 'ar' ? 'تم حذف التقييم' : 'Review Deleted';
+                    const emailMessage = lang === 'ar' ? 
+                        `مرحباً ${reviewToDelete.user.fname || 'العميل'},\n\nتم حذف تقييمك لـ: ${reviewToDelete.listing.name}.\n\nشكراً لك.` :
+                        `Hello ${reviewToDelete.user.fname || 'Customer'},\n\nYour review for: ${reviewToDelete.listing.name} has been deleted.\n\nThank you.`;
+                    
+                    await sendMail(reviewToDelete.user.email, emailSubject, emailMessage, lang, {
+                        name: reviewToDelete.user.fname || 'Customer',
+                        listingName: reviewToDelete.listing.name
+                    });
+
                     // Clear relevant caches
                     if (redisClient.isReady) {
                         const keysToDel = [
@@ -1002,6 +1038,107 @@ const reviewService = {
                         const allReviewsKeys = await redisClient.keys(cacheKeys.allReviewsAr('*'));
                         if (allReviewsKeys.length) keysToDel.push(...allReviewsKeys);
                         if (keysToDel.length > 0) await redisClient.del(keysToDel);
+
+                        // Update booking cache if review was linked to a booking
+                        if (reviewToDelete.booking && deeplClient) {
+                            const updatedBooking = await prisma.booking.findUnique({
+                                where: { id: reviewToDelete.booking.id },
+                                include: { 
+                                    user: { select: { id: true, fname: true, lname: true, email: true } }, 
+                                    listing: true, 
+                                    review: { select: { id: true, rating: true, comment: true, createdAt: true } }, 
+                                    reward: true 
+                                }
+                            });
+                            
+                            if (updatedBooking) {
+                                const translatedBooking = await translateBookingFields(updatedBooking, 'AR', 'EN');
+                                await redisClient.setEx(cacheKeys.bookingAr(reviewToDelete.booking.id), AR_CACHE_EXPIRATION, JSON.stringify(translatedBooking));
+                            }
+                        }
+
+                        // Update listing cache to reflect review deletion and recalculate stats
+                        const currentListing = await prisma.listing.findUnique({
+                            where: { id: reviewToDelete.listingId },
+                            include: {
+                                selectedMainCategories: true,
+                                selectedSubCategories: true,
+                                selectedSpecificItems: true,
+                                reviews: {
+                                    where: { status: 'ACCEPTED' },
+                                    select: { rating: true, comment: true, createdAt: true, user: { select: { fname: true, lname: true } } }
+                                },
+                                bookings: {
+                                    select: { 
+                                        id: true, status: true, createdAt: true, 
+                                        user: { select: { fname: true, lname: true } }, 
+                                        bookingDate: true, booking_hours: true, additionalNote: true, 
+                                        ageGroup: true, numberOfPersons: true, paymentMethod: true 
+                                    },
+                                }
+                            }
+                        });
+
+                        if (currentListing && deeplClient) {
+                            const acceptedReviews = currentListing.reviews;
+                            const totalReviews = acceptedReviews.length;
+                            const averageRating = totalReviews > 0
+                                ? acceptedReviews.reduce((sum, review) => sum + review.rating, 0) / totalReviews
+                                : 0;
+
+                            const ratingDistribution = {
+                                5: acceptedReviews.filter(r => r.rating === 5).length,
+                                4: acceptedReviews.filter(r => r.rating === 4).length,
+                                3: acceptedReviews.filter(r => r.rating === 3).length,
+                                2: acceptedReviews.filter(r => r.rating === 2).length,
+                                1: acceptedReviews.filter(r => r.rating === 1).length
+                            };
+
+                            const listingWithStats = {
+                                ...currentListing,
+                                averageRating: Math.round(averageRating * 10) / 10,
+                                totalReviews,
+                                ratingDistribution,
+                                totalBookings: currentListing.bookings.length,
+                                confirmedBookings: currentListing.bookings.filter(b => b.status === 'CONFIRMED').length
+                            };
+                            
+                            const translatedListing = await translateListingFields(listingWithStats, "AR", "EN");
+                            await redisClient.setEx(cacheKeys.listingAr(reviewToDelete.listingId), AR_CACHE_EXPIRATION, JSON.stringify(translatedListing));
+                        }
+
+                        // Update user reviews cache
+                        const userReviews = await prisma.review.findMany({
+                            where: { user: { uid: reviewToDelete.user.uid } },
+                            include: { 
+                                listing: { select: { name: true, id: true, description: true, agegroup: true, location: true, facilities: true, operatingHours: true } },
+                                booking: { select: { id: true, bookingDate: true, additionalNote: true, ageGroup: true, status: true, booking_hours: true, paymentMethod: true } }
+                            },
+                            orderBy: { createdAt: 'desc' }
+                        });
+
+                        if (deeplClient) {
+                            const translatedUserReviews = await Promise.all(
+                                userReviews.map(r => translateReviewFields(r, 'AR', 'EN'))
+                            );
+                            await redisClient.setEx(cacheKeys.userReviewsAr(reviewToDelete.user.uid), AR_CACHE_EXPIRATION, JSON.stringify(translatedUserReviews));
+                        }
+
+                        // Update user bookings cache if review affected booking
+                        if (reviewToDelete.booking) {
+                            const userBookings = await prisma.booking.findMany({
+                                where: { user: { uid: reviewToDelete.user.uid } },
+                                include: { listing: true, review: true, reward: true },
+                                orderBy: { createdAt: 'desc' }
+                            });
+
+                            if (userBookings.length > 0 && deeplClient) {
+                                const translatedUserBookings = await Promise.all(
+                                    userBookings.map(b => translateBookingFields(b, 'AR', 'EN'))
+                                );
+                                await redisClient.setEx(cacheKeys.userBookingsAr(reviewToDelete.user.uid), AR_CACHE_EXPIRATION, JSON.stringify(translatedUserBookings));
+                            }
+                        }
                     }
 
                     recordAuditLog(AuditLogAction.GENERAL_DELETE, {
@@ -1019,10 +1156,7 @@ const reviewService = {
                 }
             });
 
-            return { 
-                message: `Review ${reviewId} deleted successfully.`, 
-                deletedReviewId: deletedReview.id 
-            };
+            return immediateResponse;
         } catch (error) {
             console.error(`Failed to delete review ${id}: ${error.message}`);
             throw new Error(`Failed to delete review ${id}: ${error.message}`);

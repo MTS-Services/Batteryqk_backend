@@ -94,7 +94,7 @@ redisClient.on('error', (err) => console.error('Redis: Listing Cache - Error ->'
 })();
 
 const cacheKeys = {
-     bookingAr: (bookingId) => `booking:${bookingId}:ar`,
+    bookingAr: (bookingId) => `booking:${bookingId}:ar`,
     userBookingsAr: (uid) => `user:${uid}:bookings:ar`,
     listingAr: (listingId) => `listing:${listingId}:ar`,
     allListingsAr: (filterHash = '') => `listings:all${filterHash}:ar`,
@@ -536,7 +536,7 @@ async createListing(data, files, lang = "en", reqDetails = {}) {
                 const emailPromises = allUsers.map(user => sendMail(
                     user.email,
                     "New Listing Available - Full Details",
-                    `Hello ${user.fname || 'there'},\n\nA new listing has been added. Here are the details:\n\n${listingDetails}\n\nBest regards,\nYour Team`,
+                    `Hello ${user.fname || 'there'},\n\nA new listing has been added. Here are the details:\n\n${listingDetails}\n\nBest regards,\nBatteryqk team`,
                     "en",
                     { name: user.fname || 'there', listingDetails: listingDetails }
                 ).catch(err => console.error(`Failed to send email to ${user.email}:`, err)));
@@ -562,7 +562,7 @@ async createListing(data, files, lang = "en", reqDetails = {}) {
     // --- 5. Return Response Immediately ---
     return {
         success: true,
-        message: "Listing created successfully. Images are being uploaded in background.",
+        message: lang === "ar" ? "تم إنشاء القائمة بنجاح." : "Listing created successfully. Images are being uploaded in background.",
         listing: lang === "ar" ? {
             ...newListingWithRelations,
             name: data.name,
@@ -770,6 +770,16 @@ async getAllListings(filters = {}, lang = "en") {
                 processedAgeGroups.push(`${minAge}+ years`); // With 's'
                 
                 // Also check for ranges that include this age (e.g., "20-25 years" includes "25+")
+                const rangeMatch = ageStr.match(/(\d+)-(\d+)\s*years?/);
+                if (rangeMatch) {
+                    const startAge = parseInt(rangeMatch[1]);
+                    const endAge = parseInt(rangeMatch[2]);
+                    if (startAge <= minAge && endAge >= minAge) {
+                        processedAgeGroups.push(`${startAge}-${endAge} years`); // Keep original range
+                    }
+
+
+                }
                 // This will be handled in the similarity search if no exact matches
             } else {
                 // Handle regular age ranges like "20-25 years"
@@ -1949,70 +1959,138 @@ deleteImageFromServer: async function(filename) {
 
 
 
-
 async deleteListing(id, reqDetails = {}) {
     const listingId = parseInt(id, 10);
     const listing = await prisma.listing.findUnique({ where: { id: listingId }});
     if (!listing) return null;
 
-    // Delete associated images from server
-    if (listing.main_image) {
-        try {
-            const mainImageFilename = path.basename(new URL(listing.main_image).pathname);
-            const deleteSuccess = await this.deleteImageFromServer(mainImageFilename);
-            if (deleteSuccess) {
-                console.log(`Successfully deleted main image for listing ${listingId}`);
-            } else {
-                console.error(`Failed to delete main image for listing ${listingId}`);
-            }
-        } catch (err) {
-            console.error(`Error parsing main image URL for listing ${listingId}:`, err);
-        }
-    }
-    
-    if (listing.sub_images && listing.sub_images.length > 0) {
-        for (const imageUrl of listing.sub_images) {
-            try {
-                const filename = path.basename(new URL(imageUrl).pathname);
-                const deleteSuccess = await this.deleteImageFromServer(filename);
-                if (deleteSuccess) {
-                    console.log(`Successfully deleted sub-image: ${imageUrl}`);
-                } else {
-                    console.error(`Failed to delete sub-image: ${filename}`);
-                }
-            } catch (err) {
-                console.error(`Error processing sub-image deletion for ${imageUrl}:`, err);
-            }
-        }
-    }
-    
+    // Delete the listing from database first
     const deletedListing = await prisma.listing.delete({ where: { id: listingId } });
 
-    // Clear Redis cache
-    if (redisClient.isReady) {
+    // Handle background tasks for image deletion and cache clearing
+    setImmediate(async () => {
         try {
-            await redisClient.del(cacheKeys.listingAr(listingId));
-            
-            // Clear all listings cache
-            const keys = await redisClient.keys(cacheKeys.allListingsAr('*'));
-            if (keys.length > 0) {
-                await redisClient.del(keys);
+            // Delete associated images from server
+            if (listing.main_image) {
+                try {
+                    const mainImageFilename = path.basename(new URL(listing.main_image).pathname);
+                    const deleteSuccess = await this.deleteImageFromServer(mainImageFilename);
+                    if (deleteSuccess) {
+                        console.log(`Successfully deleted main image for listing ${listingId}`);
+                    } else {
+                        console.error(`Failed to delete main image for listing ${listingId}`);
+                    }
+                } catch (err) {
+                    console.error(`Error parsing main image URL for listing ${listingId}:`, err);
+                }
             }
             
-            console.log(`Redis: AR Cache - Deleted listing ${listingId} from cache`);
-        } catch (cacheError) {
-            console.error(`Redis: AR Cache - Error deleting listing ${listingId} ->`, cacheError.message);
-        }
-    }
+            if (listing.sub_images && listing.sub_images.length > 0) {
+                for (const imageUrl of listing.sub_images) {
+                    try {
+                        const filename = path.basename(new URL(imageUrl).pathname);
+                        const deleteSuccess = await this.deleteImageFromServer(filename);
+                        if (deleteSuccess) {
+                            console.log(`Successfully deleted sub-image: ${imageUrl}`);
+                        } else {
+                            console.error(`Failed to delete sub-image: ${filename}`);
+                        }
+                    } catch (err) {
+                        console.error(`Error processing sub-image deletion for ${imageUrl}:`, err);
+                    }
+                }
+            }
 
-    recordAuditLog(AuditLogAction.LISTING_DELETED, {
-        userId: reqDetails.actorUserId,
-        entityName: 'Listing',
-        entityId: listing.id,
-        oldValues: listing,
-        description: `Listing '${listing.name || listing.id}' deleted.`,
-        ipAddress: reqDetails.ipAddress,
-        userAgent: reqDetails.userAgent,
+            // Clear Redis cache for related entities
+            if (redisClient.isReady) {
+                const keysToDel = [
+                    cacheKeys.listingAr(listingId),
+                    // Clear all listings cache
+                    ...await redisClient.keys(cacheKeys.allListingsAr('*'))
+                ];
+
+                // Clear booking caches that reference this listing
+                const allBookingKeys = await redisClient.keys(cacheKeys.bookingAr('*'));
+                for (const bookingKey of allBookingKeys) {
+                    try {
+                        const cachedBooking = await redisClient.get(bookingKey);
+                        if (cachedBooking) {
+                            const booking = JSON.parse(cachedBooking);
+                            if (booking.listingId === listingId) {
+                                keysToDel.push(bookingKey);
+                            }
+                        }
+                    } catch (e) {
+                        console.error('Error checking booking cache:', e);
+                    }
+                }
+
+                // Clear user bookings caches for users who had bookings for this listing
+                const usersWithBookings = await prisma.user.findMany({
+                    where: {
+                        bookings: {
+                            some: { listingId: listingId }
+                        }
+                    },
+                    select: { uid: true }
+                }).catch(() => []); // Handle case where listing is already deleted
+
+                for (const user of usersWithBookings) {
+                    keysToDel.push(cacheKeys.userBookingsAr(user.uid));
+                }
+
+                // Clear review caches that reference this listing
+                const allReviewKeys = await redisClient.keys(cacheKeys.reviewAr('*'));
+                for (const reviewKey of allReviewKeys) {
+                    try {
+                        const cachedReview = await redisClient.get(reviewKey);
+                        if (cachedReview) {
+                            const review = JSON.parse(cachedReview);
+                            if (review.listingId === listingId) {
+                                keysToDel.push(reviewKey);
+                            }
+                        }
+                    } catch (e) {
+                        console.error('Error checking review cache:', e);
+                    }
+                }
+
+                // Clear user reviews caches for users who had reviews for this listing
+                const usersWithReviews = await prisma.user.findMany({
+                    where: {
+                        reviews: {
+                            some: { listingId: listingId }
+                        }
+                    },
+                    select: { uid: true }
+                }).catch(() => []); // Handle case where listing is already deleted
+
+                for (const user of usersWithReviews) {
+                    keysToDel.push(cacheKeys.userReviewsAr(user.uid));
+                }
+
+                if (keysToDel.length > 0) {
+                    await redisClient.del(keysToDel);
+                }
+                console.log(`Redis: AR Cache - Cleared ${keysToDel.length} related cache keys for deleted listing ${listingId}`);
+            }
+
+            // Record audit log
+            recordAuditLog(AuditLogAction.LISTING_DELETED, {
+                userId: reqDetails.actorUserId,
+                entityName: 'Listing',
+                entityId: listing.id,
+                oldValues: listing,
+                description: `Listing '${listing.name || listing.id}' deleted.`,
+                ipAddress: reqDetails.ipAddress,
+                userAgent: reqDetails.userAgent,
+            });
+
+            console.log(`Background tasks completed for deleted listing ${listingId}`);
+
+        } catch (error) {
+            console.error(`Error in background task for listing deletion ${listingId}:`, error);
+        }
     });
 
     return deletedListing;

@@ -5,10 +5,9 @@ import { createClient } from "redis";
 import * as deepl from "deepl-node";
 import { sendMail } from '../utils/mailer.js';
 import pLimit from 'p-limit';
-
 // --- DeepL Configuration ---
-const DEEPL_AUTH_KEY = process.env.DEEPL_AUTH_KEY || "30727e02-4995-4678-87a2-0ef95d788876:fx";
-const DEEPL_AUTH_KEY_2 = process.env.DEEPL_AUTH_KEY_2 || "34bd25a3-976c-43c8-8e71-81bbf9d83bf9:fx";
+const DEEPL_AUTH_KEY = process.env.DEEPL_AUTH_KEY;
+const DEEPL_AUTH_KEY_2 = process.env.DEEPL_AUTH_KEY_2;
 
 let currentKeyIndex = 0;
 const deeplKeys = [DEEPL_AUTH_KEY, DEEPL_AUTH_KEY_2];

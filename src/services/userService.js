@@ -9,9 +9,26 @@ import bcrypt from "bcrypt";
 import { v4 as uuidv4 } from "uuid";
 import * as deepl from "deepl-node";
 import { createClient } from "redis";
+import pLimit from "p-limit";
 
-const authKey = process.env.DEEPL_AUTH_KEY;
-const deeplClient = new deepl.DeepLClient(authKey);
+// --- DeepL Configuration ---
+const DEEPL_AUTH_KEY = process.env.DEEPL_AUTH_KEY;
+const DEEPL_AUTH_KEY_2 = process.env.DEEPL_AUTH_KEY_2;
+
+let currentKeyIndex = 0;
+const deeplKeys = [DEEPL_AUTH_KEY, DEEPL_AUTH_KEY_2];
+
+function getActiveDeepLClient() {
+    return new deepl.Translator(deeplKeys[currentKeyIndex]);
+}
+
+function switchToNextKey() {
+    currentKeyIndex = (currentKeyIndex + 1) % deeplKeys.length;
+    console.log(`Switched to DeepL key ${currentKeyIndex + 1}`);
+}
+
+const deeplClient = getActiveDeepLClient();
+
 
 const SALT_ROUNDS = 10;
 const REDIS_URL = process.env.REDIS_URL;
@@ -53,7 +70,195 @@ const cacheKeys = {
   allUsersAr: () => `users:all:ar`, // For AR translated list
   notificationAr: (id) => `notification:${id}:ar`,
   notificationsByUserIdAr: (userId) => `user:${userId}:notifications_list:ar`,
+     bookingAr: (bookingId) => `booking:${bookingId}:ar`,
+    userBookingsAr: (uid) => `user:${uid}:bookings:ar`,
+    listingAr: (listingId) => `listing:${listingId}:ar`,
+    reviewAr: (reviewId) => `review:${reviewId}:ar`,
+    userReviewsAr: (uid) => `user:${uid}:reviews:ar`,
+
 };
+// --- Helper Functions ---
+// async function translateText(text, targetLang, sourceLang = null) {
+//     if (!deeplClient || !text || typeof text !== 'string') return text;
+//     try {
+//         const result = await deeplClient.translateText(text, sourceLang, targetLang);
+//         return result.text;
+//     } catch (error) {
+//         console.error(`DeepL Translation error: ${error.message}`);
+//         return text;
+//     }
+// }
+
+// --- Helper Functions ---
+const translationCache = new Map();
+const limit = pLimit(5);
+
+function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function translateText(text, targetLang, sourceLang = null) {
+    let currentClient = getActiveDeepLClient();
+    
+    if (!currentClient) {
+        console.warn("DeepL client is not initialized.");
+        return text;
+    }
+
+    if (!text || typeof text !== 'string') {
+        return text;
+    }
+
+    const cacheKey = `${text}::${sourceLang || 'auto'}::${targetLang}`;
+    if (translationCache.has(cacheKey)) {
+        return translationCache.get(cacheKey);
+    }
+
+    try {
+        const result = await limit(async () => {
+            let retries = 3;
+            let keysSwitched = 0;
+            
+            while (retries > 0 && keysSwitched < deeplKeys.length) {
+                try {
+                    const res = await currentClient.translateText(text, sourceLang, targetLang);
+                    return res;
+                } catch (err) {
+                    if (err.message.includes("Too many requests") || err.message.includes("quota")) {
+                        console.warn(`DeepL rate limit/quota hit with key ${currentKeyIndex + 1}, switching key...`);
+                        switchToNextKey();
+                        currentClient = getActiveDeepLClient();
+                        keysSwitched++;
+                        await delay(500);
+                        retries--;
+                    } else {
+                        throw err;
+                    }
+                }
+            }
+            throw new Error("Failed after trying all available DeepL keys.");
+        });
+
+        console.log(`Translated: "${text}" => "${result.text}"`);
+        translationCache.set(cacheKey, result.text);
+        return result.text;
+
+    } catch (error) {
+        console.error(`DeepL Translation error: ${error.message}`);
+        return text;
+    }
+}
+async function translateReviewFields(review, targetLang, sourceLang = null) {
+    if (!review) return review;
+    
+    const translatedReview = { ...review };
+    
+    // Translate review fields
+    if (review.comment) {
+        translatedReview.comment = await translateText(review.comment, targetLang, sourceLang);
+    }
+    if (review.status) {
+        translatedReview.status = await translateText(review.status, targetLang, sourceLang);
+    }
+    
+    // Translate user fields if present
+    if (review.user) {
+        translatedReview.user = {
+            ...review.user,
+            fname: await translateText(review.user.fname, targetLang, sourceLang),
+            lname: await translateText(review.user.lname, targetLang, sourceLang)
+        };
+    }
+    
+    // Translate listing fields if present
+    if (review.listing) {
+        translatedReview.listing = {
+            ...review.listing,
+            name: await translateText(review.listing.name, targetLang, sourceLang),
+            description: review.listing.description ? await translateText(review.listing.description, targetLang, sourceLang) : null,
+            agegroup: review.listing.agegroup ? await translateArrayFields(review.listing.agegroup, targetLang, sourceLang) : [],
+            location: review.listing.location ? await translateArrayFields(review.listing.location, targetLang, sourceLang) : [],
+            facilities: review.listing.facilities ? await translateArrayFields(review.listing.facilities, targetLang, sourceLang) : [],
+            operatingHours: review.listing.operatingHours ? await translateArrayFields(review.listing.operatingHours, targetLang, sourceLang) : [],
+        };
+    }
+    
+    // Translate booking fields if present
+    if (review.booking) {
+        translatedReview.booking = {
+            ...review.booking,
+            additionalNote: review.booking.additionalNote ? await translateText(review.booking.additionalNote, targetLang, sourceLang) : null,
+            ageGroup: review.booking.ageGroup ? await translateText(review.booking.ageGroup, targetLang, sourceLang) : null,
+            status: review.booking.status ? await translateText(review.booking.status, targetLang, sourceLang) : null,
+            booking_hours: review.booking.booking_hours ? await translateText(review.booking.booking_hours, targetLang, sourceLang) : null,
+            paymentMethod: review.booking.paymentMethod ? await translateText(review.booking.paymentMethod, targetLang, sourceLang) : null
+        };
+    }
+    
+    return translatedReview;
+}
+async function translateBookingFields(booking, targetLang, sourceLang = null) {
+    console.log(`Translating booking fields to ${booking}...`);
+    if (!booking) return booking;
+    const translatedBooking = { ...booking };
+    if (booking.additionalNote) {
+        translatedBooking.additionalNote = await translateText(booking.additionalNote, targetLang, sourceLang);
+    }
+    if (booking.ageGroup) {
+        translatedBooking.ageGroup = await translateText(booking.ageGroup, targetLang, sourceLang);
+    }
+    if (booking.status) {
+        translatedBooking.status = await translateText(booking.status, targetLang, sourceLang);
+    }
+    if (booking.booking_hours) {
+        translatedBooking.booking_hours = await translateText(booking.booking_hours, targetLang, sourceLang
+        );
+    }
+    if (booking.paymentMethod) {
+        translatedBooking.paymentMethod = await translateText(booking.paymentMethod, targetLang, sourceLang
+        );
+    }
+    if (booking.user) {
+        console.log(`Translating user fields for booking ${booking.id}...`);
+        // DO NOT translate user's proper names. Preserve them.
+        console.log(`Translating user name for booking ${booking.user.name}...`);
+        console.log(`Translating user fname ${booking.user.fname} and lname ${booking.user.lname}...`);
+        translatedBooking.user = {
+            ...booking.user,
+            fname: await translateText(booking.user.fname, targetLang, sourceLang),
+            lname: await translateText(booking.user.lname, targetLang, sourceLang),
+           
+        };
+    }
+    if (booking.listing) {
+        translatedBooking.listing = {
+            ...booking.listing,
+            name: await translateText(booking.listing.name, targetLang, sourceLang),
+            description: await translateText(booking.listing.description, targetLang, sourceLang),
+            facilities: booking.listing.facilities ? await Promise.all(booking.listing.facilities.map(f => translateText(f, targetLang, sourceLang))) : [],
+            location: booking.listing.location ? await Promise.all(booking.listing.location.map(l => translateText(l, targetLang, sourceLang))) : [],
+            agegroup: booking.listing.agegroup ? await Promise.all(booking.listing.agegroup.map(a => translateText(a, targetLang, sourceLang))) : [],
+            operatingHours: booking.listing.operatingHours ? await Promise.all(booking.listing.operatingHours.map(o => translateText(o, targetLang, sourceLang))) : [],
+
+        };
+    }
+    if (booking.review) {
+        translatedBooking.review = {
+            ...booking.review,
+            status: await translateText(booking.review.status, targetLang, sourceLang),
+            comment: await translateText(booking.review.comment, targetLang, sourceLang)
+        };
+    }
+
+    if (booking.reward) {
+        translatedBooking.reward = {
+            ...booking.reward,
+            description: await translateText(booking.reward.description, targetLang, sourceLang),
+            category: await translateText(booking.reward.category, targetLang, sourceLang)
+        };
+    }
+    return translatedBooking;
+}
 
 // Helper to create user object for cache (without password), with specific names
 const createUserObjectWithNames = (userFromDb, fname, lname) => {
@@ -558,7 +763,22 @@ const userService = {
     const userId = parseInt(id, 10);
     if (isNaN(userId)) throw new Error("Invalid user ID format.");
 
-    const userBeingUpdated = await prisma.user.findUnique({ where: { id: userId } });
+    const userBeingUpdated = await prisma.user.findUnique({ 
+      where: { id: userId },
+      select: {
+        id: true,
+        email: true,
+        fname: true,
+        lname: true,
+        uid: true,
+        rewards: {
+          select: {
+            points: true,
+            category: true,
+          },
+        },
+      }
+    });
     if (!userBeingUpdated) return null;
 
     // For audit log: capture old values (English, from DB) before any modification
@@ -575,12 +795,10 @@ const userService = {
 
     if (lang === 'ar') { 
       try {
-
         console.log(dbData.fname)
-
-        if (dbData.fname) dbData.fname = (await deeplClient.translateText(dbData.fname.trim(), null, "en-US")).text;
+        if (dbData.fname) dbData.fname = await translateText(dbData.fname.trim(), 'en-US', 'ar');
         console.log(dbData.fname)
-        if (dbData.lname) dbData.lname = (await deeplClient.translateText(dbData.lname.trim(), null, "en-US")).text;
+        if (dbData.lname) dbData.lname = await translateText(dbData.lname.trim(), 'en-US', 'ar');
       } catch (translateError) {
         console.error(`DeepL: Error translating updated names for user ID ${userId} to EN -> ${translateError.message}.`);
       }
@@ -588,280 +806,354 @@ const userService = {
     if (dbData.password) dbData.password = await bcrypt.hash(dbData.password, SALT_ROUNDS);
 
     const updatedUserInDb = await prisma.user.update({
-      where: { id: userId }, data: dbData, 
+      where: { id: userId }, 
+      data: dbData,
+      select: {
+        id: true,
+        email: true,
+        fname: true,
+        lname: true,
+        uid: true,
+        createdAt: true,
+        updatedAt: true,
+        rewards: {
+          select: {
+            points: true,
+            category: true,
+          },
+        },
+      }
     });
 
-    // --- User AR Cache Update ---
-    if (redisClient.isReady) {
-        try {
-            let arFnameForCache, arLnameForCache;
-            if (originalArFnameInput !== null || originalArLnameInput !== null) { 
-                arFnameForCache = originalArFnameInput !== null ? originalArFnameInput : (updatedUserInDb.fname ? (await deeplClient.translateText(updatedUserInDb.fname, 'en', 'ar')).text : '');
-                arLnameForCache = originalArLnameInput !== null ? originalArLnameInput : (updatedUserInDb.lname ? (await deeplClient.translateText(updatedUserInDb.lname, 'en', 'ar')).text : '');
-            } else { 
-                arFnameForCache = updatedUserInDb.fname ? (await deeplClient.translateText(updatedUserInDb.fname, 'en', 'ar')).text : '';
-                arLnameForCache = updatedUserInDb.lname ? (await deeplClient.translateText(updatedUserInDb.lname, 'en', 'ar')).text : '';
-            }
-            const userForArCache = createUserObjectWithNames(updatedUserInDb, arFnameForCache, arLnameForCache);
-            await redisClient.setEx(cacheKeys.userAr(userId), AR_CACHE_EXPIRATION, JSON.stringify(userForArCache));
-            await redisClient.setEx(cacheKeys.userByUidAr(updatedUserInDb.uid), AR_CACHE_EXPIRATION, JSON.stringify(userForArCache));
-            console.log(`Redis: AR Cache - Updated AR cache for user ${userId}`);
-            
-            await redisClient.del(cacheKeys.allUsersAr());
-            console.log(`Redis: AR Cache - Invalidated ${cacheKeys.allUsersAr()}`);
-        } catch (cacheError) {
-            console.error(`Redis: AR Cache - User caching error (updateUser ${userId}) ->`, cacheError.message);
+    // Calculate total reward points and highest category
+    const totalRewardPoints = updatedUserInDb.rewards.reduce((sum, reward) => sum + (reward.points || 0), 0);
+    const categories = updatedUserInDb.rewards.map(reward => reward.category).filter(Boolean);
+    const categoryHierarchy = { BRONZE: 1, SILVER: 2, GOLD: 3, PLATINUM: 4 };
+    const highestCategory = categories.length > 0 
+      ? categories.reduce((highest, current) => 
+          categoryHierarchy[current] > categoryHierarchy[highest] ? current : highest
+        ) 
+      : 'BRONZE';
+
+    setImmediate(async () => {
+      try {
+        // --- User AR Cache Update ---
+        if (redisClient.isReady) {
+          let arFnameForCache, arLnameForCache, arRewardCategory;
+          
+          if (originalArFnameInput !== null || originalArLnameInput !== null) { 
+            arFnameForCache = originalArFnameInput !== null ? originalArFnameInput : (updatedUserInDb.fname ? await translateText(updatedUserInDb.fname, 'ar', 'en') : '');
+            arLnameForCache = originalArLnameInput !== null ? originalArLnameInput : (updatedUserInDb.lname ? await translateText(updatedUserInDb.lname, 'ar', 'en') : '');
+          } else { 
+            arFnameForCache = updatedUserInDb.fname ? await translateText(updatedUserInDb.fname, 'ar', 'en') : '';
+            arLnameForCache = updatedUserInDb.lname ? await translateText(updatedUserInDb.lname, 'ar', 'en') : '';
+          }
+          
+          // Translate reward category to Arabic
+          try {
+            arRewardCategory = highestCategory ? await translateText(highestCategory, 'ar', 'en') : '';
+          } catch (translateError) {
+            console.error(`DeepL: Error translating reward category ${highestCategory} for updated user ${userId}:`, translateError.message);
+            arRewardCategory = highestCategory;
+          }
+
+          const { rewards, ...userWithoutRewards } = updatedUserInDb;
+          const userForArCache = { 
+            ...createUserObjectWithNames(userWithoutRewards, arFnameForCache, arLnameForCache),
+            totalRewardPoints,
+            highestRewardCategory: arRewardCategory
+          };
+          
+          const keysToDel = [
+            cacheKeys.userAr(userId),
+            cacheKeys.userByUidAr(updatedUserInDb.uid),
+            cacheKeys.allUsersAr()
+          ];
+          
+          await redisClient.del(keysToDel);
+          await redisClient.setEx(cacheKeys.userAr(userId), AR_CACHE_EXPIRATION, JSON.stringify(userForArCache));
+          await redisClient.setEx(cacheKeys.userByUidAr(updatedUserInDb.uid), AR_CACHE_EXPIRATION, JSON.stringify(userForArCache));
+          console.log(`Redis: AR Cache - Updated AR cache for user ${userId} and invalidated all users cache`);
         }
-    }
 
-    // --- Notification for Profile Update ---
-    try {
-      const titleKey = "notification_profile_updated_title";
-      const messageKey = "notification_profile_updated_message";
-      const templateData = { name: updatedUserInDb.fname }; 
+        // --- Notification for Profile Update ---
+        const titleKey = "notification_profile_updated_title";
+        const messageKey = "notification_profile_updated_message";
+        const templateData = { name: updatedUserInDb.fname }; 
 
-      const dbNotificationEn = await createNotification(
-        updatedUserInDb.id, NotificationType.SYSTEM, titleKey, messageKey, lang, 
-        updatedUserInDb.id, "User", `/users/${updatedUserInDb.id}`, templateData
-      );
+        const dbNotificationEn = await createNotification(
+          updatedUserInDb.id, NotificationType.SYSTEM, titleKey, messageKey, lang, 
+          updatedUserInDb.id, "User", `/users/${updatedUserInDb.id}`, templateData
+        );
 
-      if (dbNotificationEn && lang === "ar" && redisClient.isReady) {
-        const titleAr = translate(titleKey, "ar", templateData);
-        const messageAr = translate(messageKey, "ar", templateData);
-        const notificationForArCache = { ...dbNotificationEn, title: titleAr, message: messageAr, lang: "ar" };
-        await cacheArNotification(notificationForArCache);
+        if (dbNotificationEn && lang === "ar" && redisClient.isReady) {
+          const titleAr = translate(titleKey, "ar", templateData);
+          const messageAr = translate(messageKey, "ar", templateData);
+          const notificationForArCache = { ...dbNotificationEn, title: titleAr, message: messageAr, lang: "ar" };
+          await cacheArNotification(notificationForArCache);
+        }
+
+        // --- Send email if email changed ---
+        if (updateData.email && updateData.email !== userBeingUpdated.email) {
+          sendMail(updatedUserInDb.email, 
+            translate("email_subject_profile_updated", lang),
+            translate("email_body_profile_updated_email_changed", lang, { name: (lang === 'ar' ? originalArFnameInput : updatedUserInDb.fname) || updatedUserInDb.email }),
+            lang, 
+            { name: (lang === 'ar' ? originalArFnameInput : updatedUserInDb.fname) || updatedUserInDb.email }
+          );
+        }
+      } catch (bgError) {
+        console.error(`Background task error for user update ${userId}:`, bgError);
       }
-    } catch (e) { console.error(`Notification processing error (updateUser ${userId}): ${e.message}`); }
+    });
 
-    // --- Ancillary actions (email, audit log for updateUser) ---
-    if (updateData.email && updateData.email !== userBeingUpdated.email) {
-        try { 
-            sendMail(updatedUserInDb.email, 
-                translate("email_subject_profile_updated", lang),
-                translate("email_body_profile_updated_email_changed", lang, { name: (lang === 'ar' ? originalArFnameInput : updatedUserInDb.fname) || updatedUserInDb.email }),
-                lang, 
-                { name: (lang === 'ar' ? originalArFnameInput : updatedUserInDb.fname) || updatedUserInDb.email }
-            );
-        } catch (e) { console.error(`Email error (updateUser ${userId}): ${e.message}`); }
-    }
+    // --- Audit log for updateUser ---
     try { 
-        const newValuesForAudit = {
-            email: updatedUserInDb.email,
-            fname: updatedUserInDb.fname, // English
-            lname: updatedUserInDb.lname, // English
-            // include other updated fields you track
-        };
-        recordAuditLog(AuditLogAction.USER_PROFILE_UPDATED, {
-            userId: reqDetails.actorUserId || updatedUserInDb.id, // ID of user performing the update or the user themselves
-            entityName: "User",
-            entityId: updatedUserInDb.id,
-            oldValues: oldValuesForAudit,
-            newValues: newValuesForAudit,
-            description: `User profile for ${updatedUserInDb.email} updated.`,
-            ipAddress: reqDetails.ipAddress,
-            userAgent: reqDetails.userAgent,
-        }); 
+      const newValuesForAudit = {
+        email: updatedUserInDb.email,
+        fname: updatedUserInDb.fname,
+        lname: updatedUserInDb.lname,
+      };
+      recordAuditLog(AuditLogAction.USER_PROFILE_UPDATED, {
+        userId: reqDetails.actorUserId || updatedUserInDb.id,
+        entityName: "User",
+        entityId: updatedUserInDb.id,
+        oldValues: oldValuesForAudit,
+        newValues: newValuesForAudit,
+        description: `User profile for ${updatedUserInDb.email} updated.`,
+        ipAddress: reqDetails.ipAddress,
+        userAgent: reqDetails.userAgent,
+      }); 
+    } catch (e) { 
+      console.error(`Audit log error (updateUser ${userId}): ${e.message}`); 
     }
-    catch (e) { console.error(`Audit log error (updateUser ${userId}): ${e.message}`); }
 
-
-    const { password: _, ...userToReturn } = updatedUserInDb;
+    const { password: _, rewards, ...userToReturn } = updatedUserInDb;
+    userToReturn.totalRewardPoints = totalRewardPoints;
+    userToReturn.highestRewardCategory = highestCategory;
     
     // If this was an AR update, return the original AR names instead of English DB names
     if (lang === 'ar' && (originalArFnameInput !== null || originalArLnameInput !== null)) {
       userToReturn.fname = originalArFnameInput || userToReturn.fname;
       userToReturn.lname = originalArLnameInput || userToReturn.lname;
+      // Also translate the reward category for the response
+      if (highestCategory) {
+        try {
+          userToReturn.highestRewardCategory = await translateText(highestCategory, 'ar', 'en');
+        } catch (translateError) {
+          console.error(`DeepL: Error translating reward category for response:`, translateError.message);
+        }
+      }
     }
     
     return userToReturn;
   },
 
-async deleteUser(id, lang = "en", reqDetails = {}) {
-  const userIdToDelete = parseInt(id, 10);
-  if (isNaN(userIdToDelete)) {
-    throw new Error("Invalid user ID format.");
-  }
-
-  const userToDelete = await prisma.user.findUnique({
-    where: { id: userIdToDelete },
-  });
-
-  if (!userToDelete) {
-    return null;
-  }
-
-  // --- Pre-deletion steps ---
-  const oldValuesForAudit = {
-    email: userToDelete.email,
-    fname: userToDelete.fname,
-    lname: userToDelete.lname,
-    uid: userToDelete.uid,
-  };
-
-  let dbNotificationIds = [];
-  let userBookingIds = [];
-  let userListingIds = [];
-  try {
-    const notifications = await prisma.notification.findMany({
-      where: { userId: userIdToDelete },
-      select: { id: true },
-    });
-    dbNotificationIds = notifications.map(n => n.id.toString());
-
-    // Get user's bookings for cache cleanup
-    const userBookings = await prisma.booking.findMany({
-      where: { userId: userIdToDelete },
-      select: { id: true, listingId: true },
-    });
-    userBookingIds = userBookings.map(b => b.id);
-    userListingIds = [...new Set(userBookings.map(b => b.listingId))]; // unique listing IDs
-  } catch (dbError) {
-    console.error(`DB: Error fetching user data for cache cleanup for user ${userIdToDelete}:`, dbError.message);
-  }
-
-  // --- Perform the deletion from Database ---
-  const deletedUserFromDB = await prisma.user.delete({
-    where: { id: userIdToDelete },
-  });
-
-  // --- Post-deletion cache clearing and ancillary actions ---
-  if (redisClient && redisClient.isReady) {
-    try {
-      // 1. Clear User-Specific AR Caches
-      const userArCacheKeysToDelete = [
-        cacheKeys.userAr(userIdToDelete),
-        cacheKeys.userByUidAr(userToDelete.uid)
-      ];
-      if (userArCacheKeysToDelete.length > 0) {
-          await redisClient.del(userArCacheKeysToDelete);
-          console.log(`Redis: AR Cache - Deleted user-specific AR caches for user ${userIdToDelete}:`, userArCacheKeysToDelete);
-      }
-
-      // 2. Clear AR Notification-Related Caches
-      const userArNotificationsListKey = cacheKeys.notificationsByUserIdAr(userIdToDelete);
-      // Start with notification IDs fetched from the database for robustness
-      const uniqueNotificationIdsToClear = new Set(dbNotificationIds.map(id => id.toString()));
-
-      try {
-        // Fetch the list of stringified notification objects from Redis
-        const stringifiedNotificationsFromList = await redisClient.lRange(userArNotificationsListKey, 0, -1);
-        if (stringifiedNotificationsFromList && stringifiedNotificationsFromList.length > 0) {
-          stringifiedNotificationsFromList.forEach(strNotif => {
-            try {
-              const notificationObject = JSON.parse(strNotif); // Parse each stringified object
-              if (notificationObject && notificationObject.id) {
-                uniqueNotificationIdsToClear.add(notificationObject.id.toString()); // Add its ID to the set
-              }
-            } catch (parseError) {
-              console.error(`Redis: AR Cache - Error parsing notification object from list ${userArNotificationsListKey} for user ${userIdToDelete}: ${parseError.message}`, `ObjectString: ${strNotif}`);
-            }
-          });
-        }
-      } catch (e) {
-        console.error(`Redis: AR Cache - Error fetching AR notification list ${userArNotificationsListKey} for user ${userIdToDelete}:`, e.message);
-      }
-      
-      const notificationIdsArray = Array.from(uniqueNotificationIdsToClear);
-      if (notificationIdsArray.length > 0) {
-        const individualArNotificationCacheKeys = notificationIdsArray.map(notifId =>
-          cacheKeys.notificationAr(notifId) // notifId is already a string here
-        );
-        if (individualArNotificationCacheKeys.length > 0) {
-          await redisClient.del(individualArNotificationCacheKeys);
-          console.log(`Redis: AR Cache - Deleted individual AR notification objects for user ${userIdToDelete}:`, individualArNotificationCacheKeys);
-        }
-      }
-      
-      // Always attempt to delete the list key itself (user:${userId}:notifications_list:ar)
-      await redisClient.del(userArNotificationsListKey);
-      console.log(`Redis: AR Cache - Deleted AR notification list key ${userArNotificationsListKey} for user ${userIdToDelete}`);
-
-      // 3. Clear Booking-Related AR Caches
-      const bookingCacheKeysToDelete = [];
-      
-      // Individual booking AR caches
-      if (userBookingIds.length > 0) {
-        userBookingIds.forEach(bookingId => {
-          bookingCacheKeysToDelete.push(`booking:${bookingId}:ar`);
-        });
-      }
-      
-      // User's bookings list cache
-      bookingCacheKeysToDelete.push(`user:${userToDelete.uid}:bookings:ar`);
-      
-      // User's notifications cache (booking service related)
-      bookingCacheKeysToDelete.push(`user:${userToDelete.uid}:notifications:ar`);
-      
-      // All bookings caches (pattern-based deletion)
-      try {
-        const allBookingsKeys = await redisClient.keys('bookings:all*:ar');
-        if (allBookingsKeys.length > 0) {
-          bookingCacheKeysToDelete.push(...allBookingsKeys);
-        }
-      } catch (keysError) {
-        console.error(`Redis: AR Cache - Error fetching all bookings cache keys for user ${userIdToDelete}:`, keysError.message);
-      }
-      
-      // Listing-related caches that need updating due to booking changes
-      if (userListingIds.length > 0) {
-        userListingIds.forEach(listingId => {
-          bookingCacheKeysToDelete.push(`listing:${listingId}:bookings:ar`);
-          bookingCacheKeysToDelete.push(`listing:${listingId}:ar`);
-        });
-      }
-      
-      if (bookingCacheKeysToDelete.length > 0) {
-        await redisClient.del(bookingCacheKeysToDelete);
-        console.log(`Redis: AR Cache - Deleted booking-related AR caches for user ${userIdToDelete}:`, bookingCacheKeysToDelete.length, 'keys');
-      }
-      
-      // 4. Invalidate All-Users AR Cache (Deletes the entire list, which is the standard way)
-      await redisClient.del(cacheKeys.allUsersAr());
-      console.log(`Redis: AR Cache - Invalidated all-users AR list cache: ${cacheKeys.allUsersAr()}`);
-
-    } catch (cacheError) {
-      console.error(`Redis: AR Cache - General error during cache invalidation (deleteUser ${userIdToDelete}) ->`, cacheError.message);
+  async deleteUser(id, lang = "en", reqDetails = {}) {
+    const userIdToDelete = parseInt(id, 10);
+    if (isNaN(userIdToDelete)) {
+      throw new Error("Invalid user ID format.");
     }
-  }
 
-  // Determine actor ID for audit log, handling self-deletion
-  let actorIdForAudit = reqDetails.actorUserId;
-  if (reqDetails.actorUserId && reqDetails.actorUserId === userToDelete.id) {
-    actorIdForAudit = null;
-  }
-
-  // Record Audit Log
-  try {
-    await recordAuditLog(AuditLogAction.USER_DELETED, {
-      userId: actorIdForAudit,
-      entityName: "User",
-      entityId: userToDelete.id.toString(),
-      oldValues: oldValuesForAudit,
-      description: `User ${userToDelete.email} (ID: ${userToDelete.id}) deleted.`,
-      ipAddress: reqDetails.ipAddress,
-      userAgent: reqDetails.userAgent,
+    const userToDelete = await prisma.user.findUnique({
+      where: { id: userIdToDelete },
+      select: {
+        id: true,
+        email: true,
+        fname: true,
+        lname: true,
+        uid: true,
+      }
     });
-  } catch (auditError) {
-    console.error(`Audit log error (deleteUser ${userIdToDelete}): ${auditError.message}`, auditError);
-  }
 
-  // Send Deletion Confirmation Email
-  try {
-    const nameForEmail = userToDelete.fname || userToDelete.email; // DB (English) name for consistency
-    await sendMail(
-      userToDelete.email,
-      translate("email_subject_account_deleted", lang),
-      translate("email_body_account_deleted", lang, { name: nameForEmail }),
-      lang
-    );
-    console.log(`Email sent to ${userToDelete.email} for account deletion.`);
-  } catch (emailError) {
-    console.error(`Email error during account deletion notification (deleteUser ${userIdToDelete}): ${emailError.message}`);
-  }
+    if (!userToDelete) {
+      return null;
+    }
 
-  const { password: _, ...userToReturn } = deletedUserFromDB;
-  return userToReturn;
-},
+    // --- Pre-deletion steps ---
+    const oldValuesForAudit = {
+      email: userToDelete.email,
+      fname: userToDelete.fname,
+      lname: userToDelete.lname,
+      uid: userToDelete.uid,
+    };
+
+    let dbNotificationIds = [];
+    let userBookingIds = [];
+    let userListingIds = [];
+    let userReviewIds = [];
+    
+    try {
+      const notifications = await prisma.notification.findMany({
+        where: { userId: userIdToDelete },
+        select: { id: true },
+      });
+      dbNotificationIds = notifications.map(n => n.id.toString());
+
+      // Get user's bookings for cache cleanup
+      const userBookings = await prisma.booking.findMany({
+        where: { userId: userIdToDelete },
+        select: { id: true, listingId: true },
+      });
+      userBookingIds = userBookings.map(b => b.id);
+      userListingIds = [...new Set(userBookings.map(b => b.listingId))];
+
+      // Get user's reviews for cache cleanup
+      const userReviews = await prisma.review.findMany({
+        where: { userId: userIdToDelete },
+        select: { id: true },
+      });
+      userReviewIds = userReviews.map(r => r.id);
+    } catch (dbError) {
+      console.error(`DB: Error fetching user data for cache cleanup for user ${userIdToDelete}:`, dbError.message);
+    }
+
+    // --- Perform the deletion from Database ---
+    const deletedUserFromDB = await prisma.user.delete({
+      where: { id: userIdToDelete },
+    });
+
+    setImmediate(async () => {
+      try {
+        // --- Post-deletion cache clearing ---
+        if (redisClient && redisClient.isReady) {
+          // 1. Clear User-Specific AR Caches
+          const userArCacheKeysToDelete = [
+            cacheKeys.userAr(userIdToDelete),
+            cacheKeys.userByUidAr(userToDelete.uid),
+            cacheKeys.allUsersAr()
+            
+          ];
+
+          // 2. Clear AR Notification-Related Caches
+          const userArNotificationsListKey = cacheKeys.notificationsByUserIdAr(userIdToDelete);
+          const uniqueNotificationIdsToClear = new Set(dbNotificationIds.map(id => id.toString()));
+
+          try {
+            const stringifiedNotificationsFromList = await redisClient.lRange(userArNotificationsListKey, 0, -1);
+            if (stringifiedNotificationsFromList && stringifiedNotificationsFromList.length > 0) {
+              stringifiedNotificationsFromList.forEach(strNotif => {
+                try {
+                  const notificationObject = JSON.parse(strNotif);
+                  if (notificationObject && notificationObject.id) {
+                    uniqueNotificationIdsToClear.add(notificationObject.id.toString());
+                  }
+                } catch (parseError) {
+                  console.error(`Redis: AR Cache - Error parsing notification object:`, parseError.message);
+                }
+              });
+            }
+          } catch (e) {
+            console.error(`Redis: AR Cache - Error fetching AR notification list:`, e.message);
+          }
+          
+          const notificationIdsArray = Array.from(uniqueNotificationIdsToClear);
+          if (notificationIdsArray.length > 0) {
+            const individualArNotificationCacheKeys = notificationIdsArray.map(notifId =>
+              cacheKeys.notificationAr(notifId)
+            );
+            userArCacheKeysToDelete.push(...individualArNotificationCacheKeys);
+          }
+          userArCacheKeysToDelete.push(userArNotificationsListKey);
+
+          // 3. Clear Booking-Related AR Caches
+          if (userBookingIds.length > 0) {
+            userBookingIds.forEach(bookingId => {
+              userArCacheKeysToDelete.push(cacheKeys.bookingAr(bookingId));
+            });
+          }
+          
+          userArCacheKeysToDelete.push(cacheKeys.userBookingsAr(userToDelete.uid));
+          
+          // Clear all bookings caches that might be affected
+          try {
+            const allBookingsKeys = await redisClient.keys('bookings:all*:ar');
+            if (allBookingsKeys.length > 0) {
+              userArCacheKeysToDelete.push(...allBookingsKeys);
+            }
+          } catch (keysError) {
+            console.error(`Redis: AR Cache - Error fetching all bookings cache keys:`, keysError.message);
+          }
+          
+          // 4. Clear Review-Related AR Caches
+          if (userReviewIds.length > 0) {
+            userReviewIds.forEach(reviewId => {
+              userArCacheKeysToDelete.push(cacheKeys.reviewAr(reviewId));
+            });
+            userArCacheKeysToDelete.push(cacheKeys.userReviewsAr(userToDelete.uid));
+          }
+
+          // Clear all reviews caches that might be affected
+          try {
+            const allReviewsKeys = await redisClient.keys('reviews:all*:ar');
+            if (allReviewsKeys.length > 0) {
+              userArCacheKeysToDelete.push(...allReviewsKeys);
+            }
+          } catch (keysError) {
+            console.error(`Redis: AR Cache - Error fetching all reviews cache keys:`, keysError.message);
+          }
+
+          // 5. Clear Listing-related AR caches that need updating
+          if (userListingIds.length > 0) {
+            userListingIds.forEach(listingId => {
+              userArCacheKeysToDelete.push(cacheKeys.listingAr(listingId));
+            });
+            
+            // Clear all listings caches that might be affected
+            try {
+              const allListingsKeys = await redisClient.keys('listings:all*:ar');
+              if (allListingsKeys.length > 0) {
+                userArCacheKeysToDelete.push(...allListingsKeys);
+              }
+            } catch (keysError) {
+              console.error(`Redis: AR Cache - Error fetching all listings cache keys:`, keysError.message);
+            }
+          }
+
+          // Delete all cache keys at once
+          if (userArCacheKeysToDelete.length > 0) {
+            await redisClient.del(userArCacheKeysToDelete);
+            console.log(`Redis: AR Cache - Deleted ${userArCacheKeysToDelete.length} cache keys for deleted user ${userIdToDelete}`);
+          }
+        }
+
+        // Send Deletion Confirmation Email
+        const nameForEmail = userToDelete.fname || userToDelete.email;
+        await sendMail(
+          userToDelete.email,
+          translate("email_subject_account_deleted", lang),
+          translate("email_body_account_deleted", lang, { name: nameForEmail }),
+          lang
+        );
+        console.log(`Email sent to ${userToDelete.email} for account deletion.`);
+      } catch (bgError) {
+        console.error(`Background task error for user deletion ${userIdToDelete}:`, bgError);
+      }
+    });
+
+    // Record Audit Log
+    try {
+      let actorIdForAudit = reqDetails.actorUserId;
+      if (reqDetails.actorUserId && reqDetails.actorUserId === userToDelete.id) {
+        actorIdForAudit = null;
+      }
+
+      await recordAuditLog(AuditLogAction.USER_DELETED, {
+        userId: actorIdForAudit,
+        entityName: "User",
+        entityId: userToDelete.id.toString(),
+        oldValues: oldValuesForAudit,
+        description: `User ${userToDelete.email} (ID: ${userToDelete.id}) deleted.`,
+        ipAddress: reqDetails.ipAddress,
+        userAgent: reqDetails.userAgent,
+      });
+    } catch (auditError) {
+      console.error(`Audit log error (deleteUser ${userIdToDelete}): ${auditError.message}`, auditError);
+    }
+
+    const { password: _, ...userToReturn } = deletedUserFromDB;
+    return userToReturn;
+  },
 
   // ... validateUserPassword and other methods ...
   async validateUserPassword(email, password, lang = "en") {

@@ -3,13 +3,25 @@ import { recordAuditLog } from "../utils/auditLogHandler.js";
 import { AuditLogAction } from "@prisma/client";
 import { createClient } from "redis";
 import * as deepl from "deepl-node";
+import pLimit from "p-limit";
 
 // --- DeepL Configuration ---
-const DEEPL_AUTH_KEY = process.env.DEEPL_AUTH_KEY || "YOUR_DEEPL_AUTH_KEY_HERE";
-if (DEEPL_AUTH_KEY === "YOUR_DEEPL_AUTH_KEY_HERE") {
-    console.warn("DeepL Auth Key is a placeholder. AR translations may not work. Please configure process.env.DEEPL_AUTH_KEY.");
+const DEEPL_AUTH_KEY = process.env.DEEPL_AUTH_KEY;
+const DEEPL_AUTH_KEY_2 = process.env.DEEPL_AUTH_KEY_2;
+
+let currentKeyIndex = 0;
+const deeplKeys = [DEEPL_AUTH_KEY, DEEPL_AUTH_KEY_2];
+
+function getActiveDeepLClient() {
+    return new deepl.Translator(deeplKeys[currentKeyIndex]);
 }
-const deeplClient = DEEPL_AUTH_KEY !== "YOUR_DEEPL_AUTH_KEY_HERE" ? new deepl.Translator(DEEPL_AUTH_KEY) : null;
+
+function switchToNextKey() {
+    currentKeyIndex = (currentKeyIndex + 1) % deeplKeys.length;
+    console.log(`Switched to DeepL key ${currentKeyIndex + 1}`);
+}
+
+const deeplClient = getActiveDeepLClient();
 
 // --- Redis Configuration ---
 const REDIS_URL = process.env.REDIS_URL || "redis://default:YOUR_REDIS_PASSWORD@YOUR_REDIS_HOST:PORT";
@@ -48,21 +60,184 @@ redisClient.on('end', () => console.log('Redis: AR Category Cache - Connection e
 const cacheKeys = {
     categoryAr: (mainId, subId) => `category:${mainId}:${subId}:ar`,
     allCategoriesAr: () => `categories:all_formatted:ar`,
+       bookingAr: (bookingId) => `booking:${bookingId}:ar`,
+    userBookingsAr: (uid) => `user:${uid}:bookings:ar`,
+    listingAr: (listingId) => `listing:${listingId}:ar`,
+    reviewAr: (reviewId) => `review:${reviewId}:ar`,
+    userReviewsAr: (uid) => `user:${uid}:reviews:ar`,
 };
 
 // --- Helper Functions ---
+const translationCache = new Map();
+const limit = pLimit(5);
+
+function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 async function translateText(text, targetLang, sourceLang = null) {
-    if (!deeplClient || !text || typeof text !== 'string') {
+    let currentClient = getActiveDeepLClient();
+    
+    if (!currentClient) {
+        console.warn("DeepL client is not initialized.");
         return text;
     }
+
+    if (!text || typeof text !== 'string') {
+        return text;
+    }
+
+    const cacheKey = `${text}::${sourceLang || 'auto'}::${targetLang}`;
+    if (translationCache.has(cacheKey)) {
+        return translationCache.get(cacheKey);
+    }
+
     try {
-        const result = await deeplClient.translateText(text, sourceLang, targetLang);
+        const result = await limit(async () => {
+            let retries = 3;
+            let keysSwitched = 0;
+            
+            while (retries > 0 && keysSwitched < deeplKeys.length) {
+                try {
+                    const res = await currentClient.translateText(text, sourceLang, targetLang);
+                    return res;
+                } catch (err) {
+                    if (err.message.includes("Too many requests") || err.message.includes("quota")) {
+                        console.warn(`DeepL rate limit/quota hit with key ${currentKeyIndex + 1}, switching key...`);
+                        switchToNextKey();
+                        currentClient = getActiveDeepLClient();
+                        keysSwitched++;
+                        await delay(500);
+                        retries--;
+                    } else {
+                        throw err;
+                    }
+                }
+            }
+            throw new Error("Failed after trying all available DeepL keys.");
+        });
+
+        console.log(`Translated: "${text}" => "${result.text}"`);
+        translationCache.set(cacheKey, result.text);
         return result.text;
+
     } catch (error) {
-        console.error(`DeepL Translation error: ${error.message}. Text: "${text}", TargetLang: ${targetLang}, SourceLang: ${sourceLang || 'auto'}`);
+        console.error(`DeepL Translation error: ${error.message}`);
         return text;
     }
 }
+async function translateReviewFields(review, targetLang, sourceLang = null) {
+    if (!review) return review;
+    
+    const translatedReview = { ...review };
+    
+    // Translate review fields
+    if (review.comment) {
+        translatedReview.comment = await translateText(review.comment, targetLang, sourceLang);
+    }
+    if (review.status) {
+        translatedReview.status = await translateText(review.status, targetLang, sourceLang);
+    }
+    
+    // Translate user fields if present
+    if (review.user) {
+        translatedReview.user = {
+            ...review.user,
+            fname: await translateText(review.user.fname, targetLang, sourceLang),
+            lname: await translateText(review.user.lname, targetLang, sourceLang)
+        };
+    }
+    
+    // Translate listing fields if present
+    if (review.listing) {
+        translatedReview.listing = {
+            ...review.listing,
+            name: await translateText(review.listing.name, targetLang, sourceLang),
+            description: review.listing.description ? await translateText(review.listing.description, targetLang, sourceLang) : null,
+            agegroup: review.listing.agegroup ? await translateArrayFields(review.listing.agegroup, targetLang, sourceLang) : [],
+            location: review.listing.location ? await translateArrayFields(review.listing.location, targetLang, sourceLang) : [],
+            facilities: review.listing.facilities ? await translateArrayFields(review.listing.facilities, targetLang, sourceLang) : [],
+            operatingHours: review.listing.operatingHours ? await translateArrayFields(review.listing.operatingHours, targetLang, sourceLang) : [],
+        };
+    }
+    
+    // Translate booking fields if present
+    if (review.booking) {
+        translatedReview.booking = {
+            ...review.booking,
+            additionalNote: review.booking.additionalNote ? await translateText(review.booking.additionalNote, targetLang, sourceLang) : null,
+            ageGroup: review.booking.ageGroup ? await translateText(review.booking.ageGroup, targetLang, sourceLang) : null,
+            status: review.booking.status ? await translateText(review.booking.status, targetLang, sourceLang) : null,
+            booking_hours: review.booking.booking_hours ? await translateText(review.booking.booking_hours, targetLang, sourceLang) : null,
+            paymentMethod: review.booking.paymentMethod ? await translateText(review.booking.paymentMethod, targetLang, sourceLang) : null
+        };
+    }
+    
+    return translatedReview;
+}
+async function translateBookingFields(booking, targetLang, sourceLang = null) {
+    console.log(`Translating booking fields to ${booking}...`);
+    if (!booking) return booking;
+    const translatedBooking = { ...booking };
+    if (booking.additionalNote) {
+        translatedBooking.additionalNote = await translateText(booking.additionalNote, targetLang, sourceLang);
+    }
+    if (booking.ageGroup) {
+        translatedBooking.ageGroup = await translateText(booking.ageGroup, targetLang, sourceLang);
+    }
+    if (booking.status) {
+        translatedBooking.status = await translateText(booking.status, targetLang, sourceLang);
+    }
+    if (booking.booking_hours) {
+        translatedBooking.booking_hours = await translateText(booking.booking_hours, targetLang, sourceLang
+        );
+    }
+    if (booking.paymentMethod) {
+        translatedBooking.paymentMethod = await translateText(booking.paymentMethod, targetLang, sourceLang
+        );
+    }
+    if (booking.user) {
+        console.log(`Translating user fields for booking ${booking.id}...`);
+        // DO NOT translate user's proper names. Preserve them.
+        console.log(`Translating user name for booking ${booking.user.name}...`);
+        console.log(`Translating user fname ${booking.user.fname} and lname ${booking.user.lname}...`);
+        translatedBooking.user = {
+            ...booking.user,
+            fname: await translateText(booking.user.fname, targetLang, sourceLang),
+            lname: await translateText(booking.user.lname, targetLang, sourceLang),
+           
+        };
+    }
+    if (booking.listing) {
+        translatedBooking.listing = {
+            ...booking.listing,
+            name: await translateText(booking.listing.name, targetLang, sourceLang),
+            description: await translateText(booking.listing.description, targetLang, sourceLang),
+            facilities: booking.listing.facilities ? await Promise.all(booking.listing.facilities.map(f => translateText(f, targetLang, sourceLang))) : [],
+            location: booking.listing.location ? await Promise.all(booking.listing.location.map(l => translateText(l, targetLang, sourceLang))) : [],
+            agegroup: booking.listing.agegroup ? await Promise.all(booking.listing.agegroup.map(a => translateText(a, targetLang, sourceLang))) : [],
+            operatingHours: booking.listing.operatingHours ? await Promise.all(booking.listing.operatingHours.map(o => translateText(o, targetLang, sourceLang))) : [],
+
+        };
+    }
+    if (booking.review) {
+        translatedBooking.review = {
+            ...booking.review,
+            status: await translateText(booking.review.status, targetLang, sourceLang),
+            comment: await translateText(booking.review.comment, targetLang, sourceLang)
+        };
+    }
+
+    if (booking.reward) {
+        translatedBooking.reward = {
+            ...booking.reward,
+            description: await translateText(booking.reward.description, targetLang, sourceLang),
+            category: await translateText(booking.reward.category, targetLang, sourceLang)
+        };
+    }
+    return translatedBooking;
+}
+
 
 // --- Category Service ---
 const categoryService = {
@@ -88,7 +263,7 @@ const categoryService = {
             mainCategoryName = mainCategoryRecord.name;
             originalMainCategory = mainCategoryRecord.name;
         } else {
-            if (lang === "ar") {
+            if (lang === "ar" && deeplClient) {
                 // Convert Arabic to English for database storage
                 mainCategoryName = await translateText(mainCategory, "EN-US", "AR");
             }
@@ -125,7 +300,7 @@ const categoryService = {
                     let subCategoryName = subCatData.name;
                     let specificItemNames = subCatData.specificItems || [];
 
-                    if (lang === "ar") {
+                    if (lang === "ar" && deeplClient)  {
                         // Convert Arabic to English for database storage
                         subCategoryName = await translateText(subCatData.name, "EN-US", "AR");
                         specificItemNames = await Promise.all(
@@ -181,7 +356,7 @@ const categoryService = {
 
                     // Cache Arabic version in Redis for each subcategory
                     try {
-                        if (lang === "ar") {
+                       if (lang === "ar" && deeplClient)  {
                             // Store original Arabic input in cache
                             const cacheData = {
                                 mainCategory: { name: originalMainCategory, id: mainCategoryRecord.id },
@@ -466,330 +641,359 @@ const categoryService = {
 
         let updatedMainCategory = currentMainCategory;
 
-        if (lang === "ar") {
-            // Arabic input - convert to English for DB operations
-            if (updateData.mainCategory) {
-                const mainCategoryName = await translateText(updateData.mainCategory, "EN-US", "AR");
-                
-                const existingMainCategory = await prisma.mainCategoryOption.findFirst({
-                    where: { 
-                        name: mainCategoryName,
-                        NOT: { id: mainCategoryId }
-                    }
-                });
-                
-                if (!existingMainCategory) {
-                    updatedMainCategory = await prisma.mainCategoryOption.update({
-                        where: { id: mainCategoryId },
-                        data: { name: mainCategoryName }
-                    });
-                }
-            }
+        // Provide immediate response first
+        const immediateResponse = {
+            success: true,
+            message: lang === "ar" ? "تم استلام طلب التحديث وجاري المعالجة" : "Update request received and being processed.",
+            categoryId: mainCategoryId,
+            status: "processing"
+        };
 
-            if (updateData.subCategories) {
-                const subCategories = Array.isArray(updateData.subCategories) 
-                    ? updateData.subCategories 
-                    : [updateData.subCategories];
-
-                for (const subCatData of subCategories) {
-                    const parts = subCatData.split('-');
-                    if (parts.length === 2 && !isNaN(parseInt(parts[1]))) {
-                        // Update existing subcategory by ID
-                        const subCatId = parseInt(parts[1]);
-                        const subCategoryName = await translateText(parts[0], "EN-US", "AR");
+        // Handle all updates in background
+        setImmediate(async () => {
+            try {
+                if (lang === "ar" && deeplClient) {
+                    // Arabic input - convert to English for DB operations
+                    if (updateData.mainCategory) {
+                        const mainCategoryName = await translateText(updateData.mainCategory, "EN-US", "AR");
                         
-                        const existingSubCategory = await prisma.subCategoryOption.findFirst({
+                        const existingMainCategory = await prisma.mainCategoryOption.findFirst({
                             where: { 
-                                name: subCategoryName,
-                                NOT: { id: subCatId }
+                                name: mainCategoryName,
+                                NOT: { id: mainCategoryId }
                             }
                         });
                         
-                        if (!existingSubCategory) {
-                            await prisma.subCategoryOption.update({
-                                where: { id: subCatId },
-                                data: { name: subCategoryName }
-                            });
-                        }
-                    } else {
-                        // Create new subcategory
-                        const subCategoryName = await translateText(subCatData, "EN-US", "AR");
-                        
-                        const existingSubCategory = await prisma.subCategoryOption.findFirst({
-                            where: { 
-                                name: subCategoryName,
-                                mainCategoryId: mainCategoryId
-                            }
-                        });
-                        
-                        if (!existingSubCategory) {
-                            await prisma.subCategoryOption.create({
-                                data: {
-                                    name: subCategoryName,
-                                    mainCategoryId: mainCategoryId
-                                }
+                        if (!existingMainCategory) {
+                            updatedMainCategory = await prisma.mainCategoryOption.update({
+                                where: { id: mainCategoryId },
+                                data: { name: mainCategoryName }
                             });
                         }
                     }
-                }
-            }
 
-            if (updateData.specificItem) {
-                const specificItems = Array.isArray(updateData.specificItem) 
-                    ? updateData.specificItem 
-                    : [updateData.specificItem];
+                    if (updateData.subCategories) {
+                        const subCategories = Array.isArray(updateData.subCategories) 
+                            ? updateData.subCategories 
+                            : [updateData.subCategories];
 
-                for (const itemData of specificItems) {
-                    const parts = itemData.split('-');
-                    if (parts.length === 2 && !isNaN(parseInt(parts[1]))) {
-                        // Update existing specific item by ID
-                        const itemId = parseInt(parts[1]);
-                        const itemName = await translateText(parts[0], "EN-US", "AR");
-                        
-                        // Check if the item exists before updating
-                        const itemToUpdate = await prisma.specificItemOption.findUnique({
-                            where: { id: itemId }
-                        });
-                        
-                        if (itemToUpdate) {
-                            const existingSpecificItem = await prisma.specificItemOption.findFirst({
-                                where: { 
-                                    name: itemName,
-                                    NOT: { id: itemId }
-                                }
-                            });
-                            
-                            if (!existingSpecificItem) {
-                                await prisma.specificItemOption.update({
-                                    where: { id: itemId },
-                                    data: { name: itemName }
+                        for (const subCatData of subCategories) {
+                            const parts = subCatData.split('-');
+                            if (parts.length === 2 && !isNaN(parseInt(parts[1]))) {
+                                // Update existing subcategory by ID
+                                const subCatId = parseInt(parts[1]);
+                                const subCategoryName = await translateText(parts[0], "EN-US", "AR");
+                                
+                                const existingSubCategory = await prisma.subCategoryOption.findFirst({
+                                    where: { 
+                                        name: subCategoryName,
+                                        NOT: { id: subCatId }
+                                    }
                                 });
-                            }
-                        }
-                    } else {
-                        // Create new specific item
-                        const itemName = await translateText(itemData, "EN-US", "AR");
-                        
-                        const existingSpecificItem = await prisma.specificItemOption.findFirst({
-                            where: { 
-                                name: itemName,
-                                mainCategoryId: mainCategoryId
-                            }
-                        });
-                        
-                        if (!existingSpecificItem) {
-                            await prisma.specificItemOption.create({
-                                data: {
-                                    name: itemName,
-                                    mainCategoryId: mainCategoryId,
-                                    subCategoryId: currentMainCategory.subCategories[0]?.id
+                                
+                                if (!existingSubCategory) {
+                                    await prisma.subCategoryOption.update({
+                                        where: { id: subCatId },
+                                        data: { name: subCategoryName }
+                                    });
                                 }
-                            });
-                        }
-                    }
-                }
-            }
-
-        } else {
-            // English input
-            if (updateData.mainCategory) {
-                const existingMainCategory = await prisma.mainCategoryOption.findFirst({
-                    where: { 
-                        name: updateData.mainCategory,
-                        NOT: { id: mainCategoryId }
-                    }
-                });
-                
-                if (!existingMainCategory) {
-                    updatedMainCategory = await prisma.mainCategoryOption.update({
-                        where: { id: mainCategoryId },
-                        data: { name: updateData.mainCategory }
-                    });
-                }
-            }
-
-            if (updateData.subCategories) {
-                const subCategories = Array.isArray(updateData.subCategories) 
-                    ? updateData.subCategories 
-                    : [updateData.subCategories];
-
-                for (const subCatData of subCategories) {
-                    const parts = subCatData.split('-');
-                    if (parts.length === 2 && !isNaN(parseInt(parts[1]))) {
-                        // Update existing subcategory by ID
-                        const subCatId = parseInt(parts[1]);
-                        
-                        const existingSubCategory = await prisma.subCategoryOption.findFirst({
-                            where: { 
-                                name: parts[0],
-                                NOT: { id: subCatId }
-                            }
-                        });
-                        
-                        if (!existingSubCategory) {
-                            await prisma.subCategoryOption.update({
-                                where: { id: subCatId },
-                                data: { name: parts[0] }
-                            });
-                        }
-                    } else {
-                        // Create new subcategory
-                        const existingSubCategory = await prisma.subCategoryOption.findFirst({
-                            where: { 
-                                name: subCatData,
-                                mainCategoryId: mainCategoryId
-                            }
-                        });
-                        
-                        if (!existingSubCategory) {
-                            await prisma.subCategoryOption.create({
-                                data: {
-                                    name: subCatData,
-                                    mainCategoryId: mainCategoryId
-                                }
-                            });
-                        }
-                    }
-                }
-            }
-
-            if (updateData.specificItem) {
-                const specificItems = Array.isArray(updateData.specificItem) 
-                    ? updateData.specificItem 
-                    : [updateData.specificItem];
-
-                for (const itemData of specificItems) {
-                    const parts = itemData.split('-');
-                    if (parts.length === 2 && !isNaN(parseInt(parts[1]))) {
-                        // Update existing specific item by ID
-                        const itemId = parseInt(parts[1]);
-                        
-                        // Check if the item exists before updating
-                        const itemToUpdate = await prisma.specificItemOption.findUnique({
-                            where: { id: itemId }
-                        });
-                        
-                        if (itemToUpdate) {
-                            const existingSpecificItem = await prisma.specificItemOption.findFirst({
-                                where: { 
-                                    name: parts[0],
-                                    NOT: { id: itemId },
-                                    mainCategoryId: itemToUpdate.mainCategoryId
-                                }
-                            });
-                            
-                            if (!existingSpecificItem) {
-                                await prisma.specificItemOption.update({
-                                    where: { id: itemId },
-                                    data: { name: parts[0] }
+                            } else {
+                                // Create new subcategory
+                                const subCategoryName = await translateText(subCatData, "EN-US", "AR");
+                                
+                                const existingSubCategory = await prisma.subCategoryOption.findFirst({
+                                    where: { 
+                                        name: subCategoryName,
+                                        mainCategoryId: mainCategoryId
+                                    }
                                 });
-                            }
-                        }
-                    } else {
-                        // Create new specific item
-                        const existingSpecificItem = await prisma.specificItemOption.findFirst({
-                            where: { 
-                                name: itemData,
-                                mainCategoryId: mainCategoryId
-                            }
-                        });
-                        
-                        if (!existingSpecificItem) {
-                            await prisma.specificItemOption.create({
-                                data: {
-                                    name: itemData,
-                                    mainCategoryId: mainCategoryId,
-                                    subCategoryId: currentMainCategory.subCategories[0]?.id
+                                
+                                if (!existingSubCategory) {
+                                    await prisma.subCategoryOption.create({
+                                        data: {
+                                            name: subCategoryName,
+                                            mainCategoryId: mainCategoryId
+                                        }
+                                    });
                                 }
-                            });
+                            }
                         }
                     }
-                }
-            }
-        }
 
-        // Update Redis cache for all affected subcategories
-        try {
-            const updatedCategory = await prisma.mainCategoryOption.findUnique({
-                where: { id: mainCategoryId },
-                include: {
-                    subCategories: {
-                        include: {
-                            specificItems: true
+                    if (updateData.specificItem) {
+                        const specificItems = Array.isArray(updateData.specificItem) 
+                            ? updateData.specificItem 
+                            : [updateData.specificItem];
+
+                        for (const itemData of specificItems) {
+                            const parts = itemData.split('-');
+                            if (parts.length === 2 && !isNaN(parseInt(parts[1]))) {
+                                // Update existing specific item by ID
+                                const itemId = parseInt(parts[1]);
+                                const itemName = await translateText(parts[0], "EN-US", "AR");
+                                
+                                // Check if the item exists before updating
+                                const itemToUpdate = await prisma.specificItemOption.findUnique({
+                                    where: { id: itemId }
+                                });
+                                
+                                if (itemToUpdate) {
+                                    const existingSpecificItem = await prisma.specificItemOption.findFirst({
+                                        where: { 
+                                            name: itemName,
+                                            NOT: { id: itemId }
+                                        }
+                                    });
+                                    
+                                    if (!existingSpecificItem) {
+                                        await prisma.specificItemOption.update({
+                                            where: { id: itemId },
+                                            data: { name: itemName }
+                                        });
+                                    }
+                                }
+                            } else {
+                                // Create new specific item
+                                const itemName = await translateText(itemData, "EN-US", "AR");
+                                
+                                const existingSpecificItem = await prisma.specificItemOption.findFirst({
+                                    where: { 
+                                        name: itemName,
+                                        mainCategoryId: mainCategoryId
+                                    }
+                                });
+                                
+                                if (!existingSpecificItem) {
+                                    await prisma.specificItemOption.create({
+                                        data: {
+                                            name: itemName,
+                                            mainCategoryId: mainCategoryId,
+                                            subCategoryId: currentMainCategory.subCategories[0]?.id
+                                        }
+                                    });
+                                }
+                            }
                         }
                     }
-                }
-            });
 
-            for (const subCat of updatedCategory.subCategories) {
-                if (lang === "ar") {
-                    // Store original Arabic values in cache
-                    const cacheData = {
-                        mainCategory: { name: updateData.mainCategory || updatedCategory.name, id: updatedCategory.id },
-                        subCategories: { name: subCat.name, id: subCat.id },
-                        specificItem: subCat.specificItems.map(item => ({
-                            name: item.name,
-                            id: item.id
-                        })),
-                        createdAt: updatedCategory.createdAt,
-                        updatedAt: updatedCategory.updatedAt
-                    };
-                    await redisClient.setEx(
-                        cacheKeys.categoryAr(mainCategoryId, subCat.id),
-                        AR_CACHE_EXPIRATION,
-                        JSON.stringify(cacheData)
-                    );
                 } else {
-                    // Convert to Arabic and store in cache
-                    const arMainCategory = await translateText(updatedCategory.name, "AR", "EN");
-                    const arSubCategory = await translateText(subCat.name, "AR", "EN");
-                    const arSpecificItems = await Promise.all(
-                        subCat.specificItems.map(async (item) => ({
-                            name: await translateText(item.name, "AR", "EN"),
-                            id: item.id
-                        }))
-                    );
+                    // English input
+                    if (updateData.mainCategory) {
+                        const existingMainCategory = await prisma.mainCategoryOption.findFirst({
+                            where: { 
+                                name: updateData.mainCategory,
+                                NOT: { id: mainCategoryId }
+                            }
+                        });
+                        
+                        if (!existingMainCategory) {
+                            updatedMainCategory = await prisma.mainCategoryOption.update({
+                                where: { id: mainCategoryId },
+                                data: { name: updateData.mainCategory }
+                            });
+                        }
+                    }
 
-                    const cacheData = {
-                        mainCategory: { name: arMainCategory, id: updatedCategory.id },
-                        subCategories: { name: arSubCategory, id: subCat.id },
-                        specificItem: arSpecificItems,
-                        createdAt: updatedCategory.createdAt,
-                        updatedAt: updatedCategory.updatedAt
-                    };
+                    if (updateData.subCategories) {
+                        const subCategories = Array.isArray(updateData.subCategories) 
+                            ? updateData.subCategories 
+                            : [updateData.subCategories];
 
-                    await redisClient.setEx(
-                        cacheKeys.categoryAr(mainCategoryId, subCat.id),
-                        AR_CACHE_EXPIRATION,
-                        JSON.stringify(cacheData)
-                    );
+                        for (const subCatData of subCategories) {
+                            const parts = subCatData.split('-');
+                            if (parts.length === 2 && !isNaN(parseInt(parts[1]))) {
+                                // Update existing subcategory by ID
+                                const subCatId = parseInt(parts[1]);
+                                
+                                const existingSubCategory = await prisma.subCategoryOption.findFirst({
+                                    where: { 
+                                        name: parts[0],
+                                        NOT: { id: subCatId }
+                                    }
+                                });
+                                
+                                if (!existingSubCategory) {
+                                    await prisma.subCategoryOption.update({
+                                        where: { id: subCatId },
+                                        data: { name: parts[0] }
+                                    });
+                                }
+                            } else {
+                                // Create new subcategory
+                                const existingSubCategory = await prisma.subCategoryOption.findFirst({
+                                    where: { 
+                                        name: subCatData,
+                                        mainCategoryId: mainCategoryId
+                                    }
+                                });
+                                
+                                if (!existingSubCategory) {
+                                    await prisma.subCategoryOption.create({
+                                        data: {
+                                            name: subCatData,
+                                            mainCategoryId: mainCategoryId
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    if (updateData.specificItem) {
+                        const specificItems = Array.isArray(updateData.specificItem) 
+                            ? updateData.specificItem 
+                            : [updateData.specificItem];
+
+                        for (const itemData of specificItems) {
+                            const parts = itemData.split('-');
+                            if (parts.length === 2 && !isNaN(parseInt(parts[1]))) {
+                                // Update existing specific item by ID
+                                const itemId = parseInt(parts[1]);
+                                
+                                // Check if the item exists before updating
+                                const itemToUpdate = await prisma.specificItemOption.findUnique({
+                                    where: { id: itemId }
+                                });
+                                
+                                if (itemToUpdate) {
+                                    const existingSpecificItem = await prisma.specificItemOption.findFirst({
+                                        where: { 
+                                            name: parts[0],
+                                            NOT: { id: itemId },
+                                            mainCategoryId: itemToUpdate.mainCategoryId
+                                        }
+                                    });
+                                    
+                                    if (!existingSpecificItem) {
+                                        await prisma.specificItemOption.update({
+                                            where: { id: itemId },
+                                            data: { name: parts[0] }
+                                        });
+                                    }
+                                }
+                            } else {
+                                // Create new specific item
+                                const existingSpecificItem = await prisma.specificItemOption.findFirst({
+                                    where: { 
+                                        name: itemData,
+                                        mainCategoryId: mainCategoryId
+                                    }
+                                });
+                                
+                                if (!existingSpecificItem) {
+                                    await prisma.specificItemOption.create({
+                                        data: {
+                                            name: itemData,
+                                            mainCategoryId: mainCategoryId,
+                                            subCategoryId: currentMainCategory.subCategories[0]?.id
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                    }
                 }
+
+                // Get the updated category with all includes
+                const updatedCategory = await prisma.mainCategoryOption.findUnique({
+                    where: { id: mainCategoryId },
+                    include: {
+                        subCategories: {
+                            include: {
+                                specificItems: true
+                            }
+                        }
+                    }
+                });
+
+                // Update Redis cache for all affected subcategories
+                if (redisClient.isReady) {
+                    for (const subCat of updatedCategory.subCategories) {
+                        if (lang === "ar") {
+                            // Store original Arabic values in cache
+                            const cacheData = {
+                                mainCategory: { name: updateData.mainCategory || updatedCategory.name, id: updatedCategory.id },
+                                subCategories: { name: subCat.name, id: subCat.id },
+                                specificItem: subCat.specificItems.map(item => ({
+                                    name: item.name,
+                                    id: item.id
+                                })),
+                                createdAt: updatedCategory.createdAt,
+                                updatedAt: updatedCategory.updatedAt
+                            };
+                            await redisClient.setEx(
+                                cacheKeys.categoryAr(mainCategoryId, subCat.id),
+                                AR_CACHE_EXPIRATION,
+                                JSON.stringify(cacheData)
+                            );
+                        } else {
+                            // Convert to Arabic and store in cache
+                            const arMainCategory = await translateText(updatedCategory.name, "AR", "EN");
+                            const arSubCategory = await translateText(subCat.name, "AR", "EN");
+                            const arSpecificItems = await Promise.all(
+                                subCat.specificItems.map(async (item) => ({
+                                    name: await translateText(item.name, "AR", "EN"),
+                                    id: item.id
+                                }))
+                            );
+
+                            const cacheData = {
+                                mainCategory: { name: arMainCategory, id: updatedCategory.id },
+                                subCategories: { name: arSubCategory, id: subCat.id },
+                                specificItem: arSpecificItems,
+                                createdAt: updatedCategory.createdAt,
+                                updatedAt: updatedCategory.updatedAt
+                            };
+
+                            await redisClient.setEx(
+                                cacheKeys.categoryAr(mainCategoryId, subCat.id),
+                                AR_CACHE_EXPIRATION,
+                                JSON.stringify(cacheData)
+                            );
+                        }
+                    }
+
+                    // Invalidate all categories cache
+                    await redisClient.del(cacheKeys.allCategoriesAr());
+
+                    // NEW: Invalidate all related caches that use category data
+                    const patternsToInvalidate = [
+                        'booking:*:ar',      // All booking caches
+                        'listing:*:ar',      // All listing caches  
+                        'review:*:ar',       // All review caches
+                        'user:*:bookings:ar', // All user booking caches
+                        'user:*:reviews:ar'   // All user review caches
+                    ];
+
+                    for (const pattern of patternsToInvalidate) {
+                        const keysToDelete = await redisClient.keys(pattern);
+                        if (keysToDelete.length > 0) {
+                            console.log(`Invalidating ${keysToDelete.length} cache keys for pattern: ${pattern}`);
+                            await redisClient.del(keysToDelete);
+                        }
+                    }
+                }
+
+                // Record audit log
+                recordAuditLog(AuditLogAction.CATEGORY_UPDATED, {
+                    userId: reqDetails.actorUserId,
+                    entityName: 'Category',
+                    entityId: mainCategoryId.toString(),
+                    oldValues: currentMainCategory,
+                    newValues: updateData,
+                    description: `Category '${updatedMainCategory.name}' updated.`,
+                    ipAddress: reqDetails.ipAddress,
+                    userAgent: reqDetails.userAgent,
+                });
+
+                console.log(`Background processing completed for category update: ${updatedMainCategory.name}`);
+            } catch (bgError) {
+                console.error(`Background category update processing error for ${mainCategoryId}:`, bgError);
             }
-        } catch (error) {
-            console.error('Redis cache error during update:', error.message);
-        }
-
-        // Invalidate all categories cache
-        try {
-            await redisClient.del(cacheKeys.allCategoriesAr());
-        } catch (error) {
-            console.error('Redis cache error during cache invalidation:', error.message);
-        }
-
-        // Record audit log
-        recordAuditLog(AuditLogAction.CATEGORY_UPDATED, {
-            userId: reqDetails.actorUserId,
-            entityName: 'Category',
-            entityId: mainCategoryId.toString(),
-            oldValues: currentMainCategory,
-            newValues: updateData,
-            description: `Category '${updatedMainCategory.name}' updated.`,
-            ipAddress: reqDetails.ipAddress,
-            userAgent: reqDetails.userAgent,
         });
 
-        // Return updated category in the same format
-        return await this.getCategoryById(mainCategoryId, lang);
+        // Return immediate response
+        return immediateResponse;
     },
 
     async deleteCategory(id, lang = "en", reqDetails = {}) {
@@ -819,6 +1023,23 @@ const categoryService = {
             }
             // Clear all categories cache in Arabic
             await redisClient.del(cacheKeys.allCategoriesAr());
+
+            // NEW: Invalidate all related caches that use category data
+            const patternsToInvalidate = [
+                'booking:*:ar',      // All booking caches
+                'listing:*:ar',      // All listing caches  
+                'review:*:ar',       // All review caches
+                'user:*:bookings:ar', // All user booking caches
+                'user:*:reviews:ar'   // All user review caches
+            ];
+
+            for (const pattern of patternsToInvalidate) {
+                const keysToDelete = await redisClient.keys(pattern);
+                if (keysToDelete.length > 0) {
+                    console.log(`Invalidating ${keysToDelete.length} cache keys for pattern: ${pattern}`);
+                    await redisClient.del(keysToDelete);
+                }
+            }
         } catch (error) {
             console.error('Redis cache error during category deletion:', error.message);
         }

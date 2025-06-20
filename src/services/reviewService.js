@@ -5,14 +5,25 @@ import { createClient } from "redis";
 import * as deepl from "deepl-node";
 import { sendMail } from '../utils/mailer.js';
 import pLimit from 'p-limit';
-import { da } from '@faker-js/faker';
+
 
 // --- DeepL Configuration ---
-const DEEPL_AUTH_KEY = process.env.DEEPL_AUTH_KEY || "YOUR_DEEPL_AUTH_KEY_HERE";
-if (DEEPL_AUTH_KEY === "YOUR_DEEPL_AUTH_KEY_HERE") {
-    console.warn("DeepL Auth Key is a placeholder. AR translations may not work. Please configure process.env.DEEPL_AUTH_KEY.");
+const DEEPL_AUTH_KEY = process.env.DEEPL_AUTH_KEY;
+const DEEPL_AUTH_KEY_2 = process.env.DEEPL_AUTH_KEY_2;
+
+let currentKeyIndex = 0;
+const deeplKeys = [DEEPL_AUTH_KEY, DEEPL_AUTH_KEY_2];
+
+function getActiveDeepLClient() {
+    return new deepl.Translator(deeplKeys[currentKeyIndex]);
 }
-const deeplClient = DEEPL_AUTH_KEY !== "YOUR_DEEPL_AUTH_KEY_HERE" ? new deepl.Translator(DEEPL_AUTH_KEY) : null;
+
+function switchToNextKey() {
+    currentKeyIndex = (currentKeyIndex + 1) % deeplKeys.length;
+    console.log(`Switched to DeepL key ${currentKeyIndex + 1}`);
+}
+
+const deeplClient = getActiveDeepLClient();
 
 // --- Redis Configuration ---
 const REDIS_URL = process.env.REDIS_URL || "redis://default:YOUR_REDIS_PASSWORD@YOUR_REDIS_HOST:PORT";
@@ -56,9 +67,10 @@ function delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-
 async function translateText(text, targetLang, sourceLang = null) {
-    if (!deeplClient) {
+    let currentClient = getActiveDeepLClient();
+    
+    if (!currentClient) {
         console.warn("DeepL client is not initialized.");
         return text;
     }
@@ -75,21 +87,26 @@ async function translateText(text, targetLang, sourceLang = null) {
     try {
         const result = await limit(async () => {
             let retries = 3;
-            while (retries > 0) {
+            let keysSwitched = 0;
+            
+            while (retries > 0 && keysSwitched < deeplKeys.length) {
                 try {
-                    const res = await deeplClient.translateText(text, sourceLang, targetLang);
+                    const res = await currentClient.translateText(text, sourceLang, targetLang);
                     return res;
                 } catch (err) {
-                    if (err.message.includes("Too many requests")) {
-                        console.warn("DeepL rate limit hit, retrying in 100ms...");
-                        await delay(100);
+                    if (err.message.includes("Too many requests") || err.message.includes("quota")) {
+                        console.warn(`DeepL rate limit/quota hit with key ${currentKeyIndex + 1}, switching key...`);
+                        switchToNextKey();
+                        currentClient = getActiveDeepLClient();
+                        keysSwitched++;
+                        await delay(500);
                         retries--;
                     } else {
                         throw err;
                     }
                 }
             }
-            throw new Error("Failed after multiple retries due to rate limits.");
+            throw new Error("Failed after trying all available DeepL keys.");
         });
 
         console.log(`Translated: "${text}" => "${result.text}"`);
@@ -101,6 +118,7 @@ async function translateText(text, targetLang, sourceLang = null) {
         return text;
     }
 }
+
 
 async function translateArrayFields(arr, targetLang, sourceLang = null) {
     if (!arr || !Array.isArray(arr)) return arr;

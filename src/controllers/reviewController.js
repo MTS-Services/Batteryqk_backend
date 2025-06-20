@@ -56,7 +56,7 @@ const reviewController = {
             if (!review) {
                 return res.status(404).json({
                     success: false,
-                    message: 'Review not found'
+                    message: lang === 'ar' ? 'المراجعة غير موجودة' : 'Review not found'
                 });
             }
 
@@ -75,11 +75,17 @@ const reviewController = {
     // Get reviews by user UID
     async getReviewsByUserUid(req, res) {
         try {
-            const { uid } = req.params;
+            const uid = req.user?.uid;
             const lang = req.query.lang || req.headers['accept-language'] || 'en';
 
             const reviews = await reviewService.getReviewsByUserUid(uid, lang);
-            
+            if (!reviews || reviews.length === 0) {
+                return res.status(404).json({
+                    success: false,
+                    message: lang === 'ar' ? 'لا توجد مراجعات لهذا المستخدم' : 'No reviews found for this user'
+                });
+            }
+
             res.status(200).json({
                 success: true,
                 data: reviews
@@ -122,13 +128,20 @@ const reviewController = {
     async deleteReview(req, res) {
         try {
             const { id } = req.params;
+            const lang = req.query.lang || req.headers['accept-language'] || 'en';
             const reqDetails = {
                 ipAddress: req.ip,
                 userAgent: req.get('User-Agent'),
                 actorUserId: req.user?.userId
             };
 
-            const result = await reviewService.deleteReview(id, reqDetails);
+            const result = await reviewService.deleteReview(id, lang, reqDetails);
+            if (!result) {
+                return res.status(404).json({
+                    success: false,
+                    message: req.query.lang === 'ar' ? 'المراجعة غير موجودة' : 'Review not found'
+                });
+            }
             
             res.status(200).json({
                 success: true,

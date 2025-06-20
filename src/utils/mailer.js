@@ -1,15 +1,27 @@
 import nodemailer from 'nodemailer';
 import { translate } from './i18n.js';
 
+// const transporter = nodemailer.createTransport({
+//   // Configure your email transport (e.g., SMTP, SendGrid, etc.)
+//   // Example for Gmail (requires "less secure app access" or OAuth2)
+//   service: 'gmail',
+//   auth: {
+//     user: process.env.EMAIL_USER, // your_email@gmail.com
+//     pass: process.env.EMAIL_PASS, // your_email_password or app password
+//   },
+// });
+
+
 const transporter = nodemailer.createTransport({
-  // Configure your email transport (e.g., SMTP, SendGrid, etc.)
-  // Example for Gmail (requires "less secure app access" or OAuth2)
-  service: 'gmail',
+  host: process.env.EMAIL_HOST, // smtp.hostinger.com
+  port: parseInt(process.env.EMAIL_PORT), // 465
+  secure: process.env.EMAIL_SECURE === 'true', // true for 465
   auth: {
-    user: process.env.EMAIL_USER, // your_email@gmail.com
-    pass: process.env.EMAIL_PASS, // your_email_password or app password
+    user: process.env.EMAIL_USER, 
+    pass: process.env.EMAIL_PASS, 
   },
 });
+
 
 const sendMail = async (to, subjectKey, bodyKey, lang = 'en', templateData = {}) => {
   const subject = translate(subjectKey, lang, templateData);

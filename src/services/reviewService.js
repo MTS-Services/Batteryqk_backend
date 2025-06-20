@@ -651,6 +651,15 @@ const reviewService = {
     async getReviewById(id, lang = 'en') {
         try {
             const reviewId = parseInt(id);
+            //check if reviewId is a valid number
+         const isValidId =  prisma.review.findUnique({
+                where: { id: reviewId },
+            });
+            if (!isValidId) 
+            {
+              throw new Error('Invalid review ID');
+            }
+
             const cacheKey = cacheKeys.reviewAr(reviewId);
 
             if (lang === 'ar' && redisClient.isReady) {
@@ -686,6 +695,10 @@ const reviewService = {
     // 4. Get Reviews by User UID
     async getReviewsByUserUid(uid, lang = 'en') {
         try {
+            console.log(`Fetching reviews for user UID: ${uid} in language: ${lang}`);
+            //  find user by UID
+            const user = await prisma.user.findUnique({ where: { uid: uid } });
+            if (!user) throw new Error('User not found');
             const cacheKey = cacheKeys.userReviewsAr(uid);
 
             if (lang === 'ar' && redisClient.isReady) {

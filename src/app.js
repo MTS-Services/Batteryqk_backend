@@ -13,6 +13,7 @@ import categoryRouter from './routers/categoryRouter.js';
 import listingRouter from './routers/listingRouter.js';
 import BookingRouter from './routers/bookingRouter.js'; // If you have a booking router, import it here
 import reviewRouter from './routers/reviewRouter.js'; // If you have a review router, import it here
+import notificationRouter from './routers/notificationRouter.js'; // If you have a notification router, import it here
 
 
 // Import Middlewares
@@ -83,6 +84,8 @@ app.use('/api/categories', categoryRouter);
 app.use('/api/listings', listingRouter);
 app.use('/api/bookings', BookingRouter); // If you have a booking router, use it here
 app.use('/api/reviews', reviewRouter); // If you have a review router, use it here
+app.use('/api/notifications', notificationRouter); // If you have a notification router, use it here
+
 
 // if other  mean which i not declare then say hi hackers
 app.use((req, res) => {

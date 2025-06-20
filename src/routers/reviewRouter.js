@@ -14,7 +14,7 @@ router.get('/', verifyToken,reviewController.getAllReviews);
 router.get('/:id',verifyToken, reviewController.getReviewById);
 
 // Get reviews by user UID (public route)
-router.get('/user/:uid', verifyToken, reviewController.getReviewsByUserUid);
+router.get('/user/review', verifyToken, reviewController.getReviewsByUserUid);
 
 // Update review (requires authentication for users, optional for admin)
 router.put('/:id', verifyToken, reviewController.updateReview);

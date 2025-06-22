@@ -874,6 +874,96 @@ const userService = {
           await redisClient.setEx(cacheKeys.userAr(userId), AR_CACHE_EXPIRATION, JSON.stringify(userForArCache));
           await redisClient.setEx(cacheKeys.userByUidAr(updatedUserInDb.uid), AR_CACHE_EXPIRATION, JSON.stringify(userForArCache));
           console.log(`Redis: AR Cache - Updated AR cache for user ${userId} and invalidated all users cache`);
+
+          // Update related caches if user name was updated
+          if (originalArFnameInput !== null || originalArLnameInput !== null || updateData.fname || updateData.lname) {
+            console.log(`User name was updated, updating related caches...`);
+            
+            // Update user's bookings cache
+            const userBookings = await prisma.booking.findMany({
+              where: { userId: userId },
+              include: { 
+                user: { select: { id: true, fname: true, lname: true, email: true, uid: true } }, 
+                listing: true, 
+                review: { select: { id: true, rating: true, comment: true, createdAt: true, status: true } }, 
+                reward: true 
+              },
+              orderBy: { createdAt: 'desc' }
+            });
+
+            if (userBookings.length > 0) {
+              // Delete existing booking caches
+              const bookingKeysToDelete = userBookings.map(booking => cacheKeys.bookingAr(booking.id));
+              bookingKeysToDelete.push(cacheKeys.userBookingsAr(updatedUserInDb.uid));
+              await redisClient.del(bookingKeysToDelete);
+
+              // Update individual booking caches with new user name
+              for (const booking of userBookings) {
+                const translatedBooking = await translateBookingFields(booking, 'ar', 'en');
+                await redisClient.setEx(cacheKeys.bookingAr(booking.id), AR_CACHE_EXPIRATION, JSON.stringify(translatedBooking));
+              }
+
+              // Update user bookings list cache
+              const translatedUserBookings = await Promise.all(
+                userBookings.map(b => translateBookingFields(b, 'ar', 'en'))
+              );
+              await redisClient.setEx(cacheKeys.userBookingsAr(updatedUserInDb.uid), AR_CACHE_EXPIRATION, JSON.stringify(translatedUserBookings));
+              console.log(`Redis: AR Cache - Updated ${userBookings.length} booking caches for user ${userId}`);
+            }
+
+            // Update user's reviews cache
+            const userReviews = await prisma.review.findMany({
+              where: { userId: userId },
+              include: { 
+                user: { select: { uid: true, fname: true, lname: true } }, 
+                listing: { select: { name: true, id: true, description: true, agegroup: true, location: true, facilities: true, operatingHours: true } },
+                booking: { select: { id: true, bookingDate: true, additionalNote: true, ageGroup: true, status: true, booking_hours: true, paymentMethod: true } }
+              },
+              orderBy: { createdAt: 'desc' }
+            });
+
+            if (userReviews.length > 0) {
+              // Delete existing review caches
+              const reviewKeysToDelete = userReviews.map(review => cacheKeys.reviewAr(review.id));
+              reviewKeysToDelete.push(cacheKeys.userReviewsAr(updatedUserInDb.uid));
+              await redisClient.del(reviewKeysToDelete);
+
+              // Update individual review caches with new user name
+              for (const review of userReviews) {
+                const translatedReview = await translateReviewFields(review, 'ar', 'en');
+                await redisClient.setEx(cacheKeys.reviewAr(review.id), AR_CACHE_EXPIRATION, JSON.stringify(translatedReview));
+              }
+
+              // Update user reviews list cache
+              const translatedUserReviews = await Promise.all(
+                userReviews.map(r => translateReviewFields(r, 'ar', 'en'))
+              );
+              await redisClient.setEx(cacheKeys.userReviewsAr(updatedUserInDb.uid), AR_CACHE_EXPIRATION, JSON.stringify(translatedUserReviews));
+              console.log(`Redis: AR Cache - Updated ${userReviews.length} review caches for user ${userId}`);
+            }
+
+            // Update affected listing caches (listings that have bookings/reviews from this user)
+            const affectedListingIds = new Set();
+            userBookings.forEach(booking => affectedListingIds.add(booking.listingId));
+            userReviews.forEach(review => review.listing && affectedListingIds.add(review.listing.id));
+
+            if (affectedListingIds.size > 0) {
+              const listingKeysToDelete = Array.from(affectedListingIds).map(listingId => cacheKeys.listingAr(listingId));
+              await redisClient.del(listingKeysToDelete);
+              console.log(`Redis: AR Cache - Invalidated ${listingKeysToDelete.length} listing caches affected by user name update`);
+              
+              // Also invalidate all bookings and reviews caches that might be affected
+              const allBookingsKeys = await redisClient.keys('bookings:all*:ar');
+              const allReviewsKeys = await redisClient.keys('reviews:all*:ar');
+              const allListingsKeys = await redisClient.keys('listings:all*:ar');
+              
+              const allKeysToDelete = [...allBookingsKeys, ...allReviewsKeys, ...allListingsKeys];
+              if (allKeysToDelete.length > 0) {
+                await redisClient.del(allKeysToDelete);
+                console.log(`Redis: AR Cache - Invalidated ${allKeysToDelete.length} aggregate cache keys due to user name update`);
+              }
+            }
+          }
         }
 
         // --- Notification for Profile Update ---

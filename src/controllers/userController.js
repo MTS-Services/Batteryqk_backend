@@ -187,7 +187,7 @@ const userController = {
         actorUserId: req.user?.id
       };
 
-      const updatedUser = await userService.resetPassword(email, newPassword, lang, reqDetails);
+      const updatedUser = await userService.resetpassword(email, newPassword, lang, reqDetails);
       
       res.status(200).json({
         message: translate('password_reset_successful', lang),

@@ -53,6 +53,8 @@
   "booking_deleted_error": "خطأ في حذف الحجز.",
   "bookings_retrieved": "تم استرجاع الحجوزات بنجاح.",
   "booking_retrieved": "تم استرجاع الحجز بنجاح.",
-  "password_reset_successful": "تم إعادة تعيين كلمة المرور بنجاح."
+  "password_reset_successful": "تم إعادة تعيين كلمة المرور بنجاح.",
+  "email_subjecat_password_reset": "إعادة تعيين كلمة المرور",
+  "email_body_password_reset": "مرحباً {{name}},\n\nلقد طلبت إعادة تعيين كلمة المرور. يرجى اتباع الرابط التالي لإعادة تعيينها: {{resetLink}}"
 
 }

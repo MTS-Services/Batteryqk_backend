@@ -1275,13 +1275,6 @@ const userService = {
       }
     });
 
-    // Send confirmation email
-    await sendMail(updatedUser.email, 
-      translate("email_subject_password_reset", lang),
-      translate("email_body_password_reset", lang, { name: updatedUser.fname }),
-      lang
-    );
-
     return updatedUser;
   },
 

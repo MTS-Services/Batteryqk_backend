@@ -50,5 +50,6 @@
   "booking_deleted_error": "Error deleting booking.",
   "bookings_retrieved": "Bookings retrieved successfully.",
   "booking_retrieved": "Booking retrieved successfully.",
-  "password_reset_successful": "Password reset successfully."
+  "password_reset_successful": "Password reset successfully.",
+  "email_subjecat_password_reset": "Password Reset Request"
 }

@@ -168,7 +168,58 @@ const userController = {
     } catch (error) {
         next(error);
     }
+  },
+
+  async resetPassword(req, res, next) {
+    const lang = getLanguage(req);
+    try {
+      const { email, newPassword } = req.body;
+      
+      if (!email || !newPassword) {
+        return res.status(400).json({ 
+          message: translate('email_and_password_required', lang) 
+        });
+      }
+
+      const reqDetails = {
+        ipAddress: req.ip,
+        userAgent: req.headers['user-agent'],
+        actorUserId: req.user?.id
+      };
+
+      const updatedUser = await userService.resetPassword(email, newPassword, lang, reqDetails);
+      
+      res.status(200).json({
+        message: translate('password_reset_successful', lang),
+        data: { email: updatedUser.email, name: updatedUser.fname }
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  async findUserByEmail(req, res, next) {
+    const lang = getLanguage(req);
+    try {
+      const { email } = req.params;
+      
+      const user = await userService.findUserByEmail(email, lang);
+      
+      res.status(200).json({
+        message: translate('user_found', lang),
+        data: { 
+          id: user.id, 
+          email: user.email, 
+          fname: user.fname, 
+          lname: user.lname, 
+          uid: user.uid 
+        }
+      });
+    } catch (error) {
+      next(error);
+    }
   }
+
 };
 
 export default userController;

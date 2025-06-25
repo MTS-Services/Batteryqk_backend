@@ -16,5 +16,7 @@ router.get('/self', verifyToken, userController.getUserByUid); // User can get t
 router.put('/update/:id', verifyToken, userController.updateUser); // User can update their own, or admin can update any
 router.delete('/delete/:id', verifyToken, userController.deleteUser); // Admin action or user can delete their own account
 router.post('/login', userController.loginUser); // Public: User login
+router.post('/reset-password', userController.resetPassword); // Public: Password reset
+router.get('/find-email/:email', userController.findUserByEmail); // Public: Find user by email
 
 export default router;

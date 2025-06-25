@@ -52,6 +52,7 @@
   "booking_deleted": "تم حذف الحجز بنجاح.",
   "booking_deleted_error": "خطأ في حذف الحجز.",
   "bookings_retrieved": "تم استرجاع الحجوزات بنجاح.",
-  "booking_retrieved": "تم استرجاع الحجز بنجاح."
+  "booking_retrieved": "تم استرجاع الحجز بنجاح.",
+  "password_reset_successful": "تم إعادة تعيين كلمة المرور بنجاح."
 
 }

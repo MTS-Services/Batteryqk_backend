@@ -576,6 +576,7 @@ const userService = {
   },
 
   // ... getUserById, getUserByUid, etc.
+
   async getUserById(id, lang = "en") {
     const user = await prisma.user.findUnique({ where: { id: parseInt(id, 10) }, select: {
       id: true,
@@ -1255,6 +1256,42 @@ const userService = {
     const { password: _, ...userWithoutPassword } = user;
     return userWithoutPassword;
   },
+
+  async resetpassword(email, newPassword, lang = "en") {
+    if (!email || !newPassword) throw new errorHandler(translate("error_email_and_password_required", lang), 400);
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) throw new errorHandler(translate("error_user_not_found", lang), 404);
+    
+    const hashedPassword = await bcrypt.hash(newPassword, SALT_ROUNDS);
+    const updatedUser = await prisma.user.update({
+      where: { email },
+      data: { password: hashedPassword },
+      select: {
+        id: true,
+        email: true,
+        fname: true,
+        lname: true,
+        uid: true,
+      }
+    });
+
+    // Send confirmation email
+    await sendMail(updatedUser.email, 
+      translate("email_subject_password_reset", lang),
+      translate("email_body_password_reset", lang, { name: updatedUser.fname }),
+      lang
+    );
+
+    return updatedUser;
+  },
+
+  async findUserByEmail(email, lang = "en") {
+    if (!email) throw new errorHandler(translate("error_email_required", lang), 400);
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) throw new errorHandler(translate("error_user_not_found", lang), 404);
+    return user;
+  }
+
 };
 
 export default userService;

@@ -351,6 +351,8 @@ async createListing(data, files, lang = "en", reqDetails = {}) {
         location: location ? (Array.isArray(location) ? location : [location]) : [],
         facilities: facilities ? (Array.isArray(facilities) ? facilities : [facilities]) : [],
         operatingHours: operatingHours ? (Array.isArray(operatingHours) ? operatingHours : [operatingHours]) : [],
+        gender: gender || null,
+        discount: discount || null,
     };
 
     // If input is Arabic, translate to English for database storage

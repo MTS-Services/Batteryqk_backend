@@ -166,6 +166,8 @@ async function translateBookingFields(booking, targetLang, sourceLang = null) {
             location: booking.listing.location ? await Promise.all(booking.listing.location.map(l => translateText(l, targetLang, sourceLang))) : [],
             agegroup: booking.listing.agegroup ? await Promise.all(booking.listing.agegroup.map(a => translateText(a, targetLang, sourceLang))) : [],
             operatingHours: booking.listing.operatingHours ? await Promise.all(booking.listing.operatingHours.map(o => translateText(o, targetLang, sourceLang))) : [],
+            gender: booking.listing.gender ? await translateText(booking.listing.gender, targetLang, sourceLang) : null,
+            discount: booking.listing.discount ? await translateText(booking.listing.discount, targetLang, sourceLang) : null
 
         };
     }
@@ -218,6 +220,8 @@ async function translateReviewFields(review, targetLang, sourceLang = null) {
             location: review.listing.location ? await translateArrayFields(review.listing.location, targetLang, sourceLang) : [],
             facilities: review.listing.facilities ? await translateArrayFields(review.listing.facilities, targetLang, sourceLang) : [],
             operatingHours: review.listing.operatingHours ? await translateArrayFields(review.listing.operatingHours, targetLang, sourceLang) : [],
+            gender: review.listing.gender ? await translateText(review.listing.gender, targetLang, sourceLang) : null,
+            discount: review.listing.discount ? await translateText(review.listing.discount, targetLang, sourceLang) : null
         };
     }
     

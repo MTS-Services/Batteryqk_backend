@@ -155,6 +155,8 @@ async function translateReviewFields(review, targetLang, sourceLang = null) {
             location: review.listing.location ? await translateArrayFields(review.listing.location, targetLang, sourceLang) : [],
             facilities: review.listing.facilities ? await translateArrayFields(review.listing.facilities, targetLang, sourceLang) : [],
             operatingHours: review.listing.operatingHours ? await translateArrayFields(review.listing.operatingHours, targetLang, sourceLang) : [],
+            gender: review.listing.gender ? await translateText(review.listing.gender, targetLang, sourceLang) : null,
+            discount: review.listing.discount ? await translateText(review.listing.discount, targetLang, sourceLang) : null
         };
     }
     
@@ -164,7 +166,7 @@ async function translateReviewFields(review, targetLang, sourceLang = null) {
             ...review.booking,
             additionalNote: review.booking.additionalNote ? await translateText(review.booking.additionalNote, targetLang, sourceLang) : null,
             ageGroup: review.booking.ageGroup ? await translateText(review.booking.ageGroup, targetLang, sourceLang) : null,
-            status: review.booking.status ? await translateText(review.booking.status, targetLang, sourceLang) : null,
+            //status: review.booking.status ? await translateText(review.booking.status, targetLang, sourceLang) : null,
             booking_hours: review.booking.booking_hours ? await translateText(review.booking.booking_hours, targetLang, sourceLang) : null,
             paymentMethod: review.booking.paymentMethod ? await translateText(review.booking.paymentMethod, targetLang, sourceLang) : null
         };
@@ -177,6 +179,7 @@ async function translateBookingFields(booking, targetLang, sourceLang = null) {
     console.log(`Translating booking fields to ${booking}...`);
     if (!booking) return booking;
     const translatedBooking = { ...booking };
+
     if (booking.additionalNote) {
         translatedBooking.additionalNote = await translateText(booking.additionalNote, targetLang, sourceLang);
     }
@@ -215,6 +218,8 @@ async function translateBookingFields(booking, targetLang, sourceLang = null) {
             location: booking.listing.location ? await Promise.all(booking.listing.location.map(l => translateText(l, targetLang, sourceLang))) : [],
             agegroup: booking.listing.agegroup ? await Promise.all(booking.listing.agegroup.map(a => translateText(a, targetLang, sourceLang))) : [],
             operatingHours: booking.listing.operatingHours ? await Promise.all(booking.listing.operatingHours.map(o => translateText(o, targetLang, sourceLang))) : [],
+            gender: booking.listing.gender ? await translateText(booking.listing.gender, targetLang, sourceLang) : null,
+            discount: booking.listing.discount ? await translateText(booking.listing.discount, targetLang, sourceLang) : null
 
         };
     }

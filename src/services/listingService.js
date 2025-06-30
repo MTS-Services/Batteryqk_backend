@@ -183,9 +183,9 @@ async function translateBookingFields(booking, targetLang, sourceLang = null) {
     if (booking.ageGroup) {
         translatedBooking.ageGroup = await translateText(booking.ageGroup, targetLang, sourceLang);
     }
-    if (booking.status) {
-        translatedBooking.status = await translateText(booking.status, targetLang, sourceLang);
-    }
+    // if (booking.status) {
+    //     translatedBooking.status = await translateText(booking.status, targetLang, sourceLang);
+    // }
     if (booking.booking_hours) {
         translatedBooking.booking_hours = await translateText(booking.booking_hours, targetLang, sourceLang
         );
@@ -221,7 +221,7 @@ async function translateBookingFields(booking, targetLang, sourceLang = null) {
     if (booking.review) {
         translatedBooking.review = {
             ...booking.review,
-            status: await translateText(booking.review.status, targetLang, sourceLang),
+            //status: await translateText(booking.review.status, targetLang, sourceLang),
             comment: await translateText(booking.review.comment, targetLang, sourceLang)
         };
     }
@@ -245,6 +245,13 @@ async function translateListingFields(listing, targetLang, sourceLang = null) {
     if (!listing) return listing;
 
     const translatedListing = { ...listing };
+
+    if(listing.gender) {
+        translatedListing.gender = await translateText(listing.gender, targetLang, sourceLang);
+    }
+    if (listing.discount) {
+        translatedListing.discount = await translateText(listing.discount, targetLang, sourceLang);
+    }
 
     // Translate basic text fields
     if (listing.name)
@@ -279,7 +286,7 @@ async function translateListingFields(listing, targetLang, sourceLang = null) {
             listing.reviews.map(async (review) => ({
                 ...review,
                 comment: await translateText(review.comment, targetLang, sourceLang),
-                status: await translateText(review.status, targetLang, sourceLang),
+               // status: await translateText(review.status, targetLang, sourceLang),
                 // DO NOT translate user's proper names. Preserve them.
                 user: await translateText(review.user.fname, targetLang, sourceLang) + ' ' + await translateText(review.user.lname, targetLang, sourceLang),
             }))
@@ -293,7 +300,7 @@ async function translateListingFields(listing, targetLang, sourceLang = null) {
                 ...booking,
                 additionalNote: await translateText(booking.additionalNote, targetLang, sourceLang),
                 ageGroup: await translateText(booking.ageGroup, targetLang, sourceLang),
-                status: await translateText(booking.status, targetLang, sourceLang),
+               // status: await translateText(booking.status, targetLang, sourceLang),
                 booking_hours: booking.booking_hours
                     ? await translateText(booking.booking_hours, targetLang, sourceLang)
                     : null,
@@ -322,13 +329,15 @@ const listingService = {
 async createListing(data, files, lang = "en", reqDetails = {}) {
     const { 
         name, price, description, agegroup, location, facilities, operatingHours, 
-        mainCategoryIds, subCategoryIds, specificItemIds 
+        mainCategoryIds, subCategoryIds, specificItemIds, gender, discount
     } = data;
 
     console.log('Received category data:', {
         mainCategoryIds,
         subCategoryIds,
-        specificItemIds
+        specificItemIds,
+        gender,
+        discount
     });
 
     // --- 1. Prepare Data for Database (store in English by default) ---
@@ -353,8 +362,12 @@ async createListing(data, files, lang = "en", reqDetails = {}) {
             listingDataForDb.location,
             listingDataForDb.facilities,
             listingDataForDb.operatingHours,
+            listingDataForDb.gender,
+            listingDataForDb.discount
         ] = await Promise.all([
             name ? translateText(name, "EN-US", "AR") : null,
+            gender ? translateText(gender, "EN-US", "AR") : null,
+            discount ? translateText(discount, "EN-US", "AR") : null,
             description ? translateText(description, "EN-US", "AR") : null,
             agegroup ? translateArrayFields(Array.isArray(agegroup) ? agegroup : [agegroup], "EN-US", "AR") : [],
             location ? translateArrayFields(Array.isArray(location) ? location : [location], "EN-US", "AR") : [],
@@ -549,6 +562,9 @@ async createListing(data, files, lang = "en", reqDetails = {}) {
     Description: ${enhancedFinalListing.description || 'No description available.'}
     Location: ${enhancedFinalListing.location?.join(', ') || 'N/A'}
     Facilities: ${enhancedFinalListing.facilities?.join(', ') || 'N/A'}
+    Operating Hours: ${enhancedFinalListing.operatingHours?.join(', ') || 'N/A'}
+    Gender: ${enhancedFinalListing.gender || 'N/A'}
+    Discount: ${enhancedFinalListing.discount ? `${enhancedFinalListing.discount}%` : 'N/A'}
     Main Categories: ${enhancedFinalListing.selectedMainCategories?.map(cat => cat.name).join(', ') || 'N/A'}
     Sub Categories: ${enhancedFinalListing.selectedSubCategories?.map(cat => cat.name).join(', ') || 'N/A'}
     Specific Items: ${enhancedFinalListing.selectedSpecificItems?.map(item => item.name).join(', ') || 'N/A'}
@@ -583,7 +599,7 @@ async createListing(data, files, lang = "en", reqDetails = {}) {
     // --- 5. Return Response Immediately ---
     return {
         success: true,
-        message: lang === "ar" ? "تم إنشاء القائمة بنجاح." : "Listing created successfully. Images are being uploaded in background.",
+        message: lang == "ar" ? "تم إنشاء القائمة بنجاح." : "Listing created successfully. Images are being uploaded in background.",
         listing: lang === "ar" ? {
             ...newListingWithRelations,
             name: data.name,
@@ -592,6 +608,8 @@ async createListing(data, files, lang = "en", reqDetails = {}) {
             location: data.location || [],
             facilities: data.facilities || [],
             operatingHours: data.operatingHours || [],
+            gender: data.gender || 'N/A',
+            discount: data.discount ? `${data.discount}%` : 'N/A',
         } : newListingWithRelations
     };
 },
@@ -1566,8 +1584,8 @@ async updateListing(id, data, files, lang = "en", reqDetails = {}) {
     // Handle case where data might be undefined or empty
     const safeData = data || {};
     const { name, price, description, agegroup, location, facilities, operatingHours, 
-            mainCategoryIds, subCategoryIds, specificItemIds } = safeData;
-    
+            mainCategoryIds, subCategoryIds, specificItemIds, gender, discount } = safeData;
+
     let updateData = {};
 
     // Handle price
@@ -1582,6 +1600,8 @@ async updateListing(id, data, files, lang = "en", reqDetails = {}) {
         if (location !== undefined) updateData.location = await translateArrayFields(Array.isArray(location) ? location : [location], "EN-US", "AR");
         if (facilities !== undefined) updateData.facilities = await translateArrayFields(Array.isArray(facilities) ? facilities : [facilities], "EN-US", "AR");
         if (operatingHours !== undefined) updateData.operatingHours = await translateArrayFields(Array.isArray(operatingHours) ? operatingHours : [operatingHours], "EN-US", "AR");
+        if (gender !== undefined) updateData.gender = await translateText(gender, "EN-US", "AR");
+        if (discount !== undefined) updateData.discount = await translateText(discount, "EN-US", "AR");
     } else {
         // If input is English, store directly
         if (name !== undefined) updateData.name = name;
@@ -1590,6 +1610,8 @@ async updateListing(id, data, files, lang = "en", reqDetails = {}) {
         if (location !== undefined) updateData.location = Array.isArray(location) ? location : [location];
         if (facilities !== undefined) updateData.facilities = Array.isArray(facilities) ? facilities : [facilities];
         if (operatingHours !== undefined) updateData.operatingHours = Array.isArray(operatingHours) ? operatingHours : [operatingHours];
+        if (gender !== undefined) updateData.gender = gender;
+        if (discount !== undefined) updateData.discount = discount;
     }
 
     // Update listing with basic data first (without images)

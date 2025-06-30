@@ -157,9 +157,9 @@ async function translateReviewFields(review, targetLang, sourceLang = null) {
     if (review.comment) {
         translatedReview.comment = await translateText(review.comment, targetLang, sourceLang);
     }
-    if (review.status) {
-        translatedReview.status = await translateText(review.status, targetLang, sourceLang);
-    }
+    // if (review.status) {
+    //     translatedReview.status = await translateText(review.status, targetLang, sourceLang);
+    // }
     
     // Translate user fields if present
     if (review.user) {
@@ -189,7 +189,7 @@ async function translateReviewFields(review, targetLang, sourceLang = null) {
             ...review.booking,
             additionalNote: review.booking.additionalNote ? await translateText(review.booking.additionalNote, targetLang, sourceLang) : null,
             ageGroup: review.booking.ageGroup ? await translateText(review.booking.ageGroup, targetLang, sourceLang) : null,
-            status: review.booking.status ? await translateText(review.booking.status, targetLang, sourceLang) : null,
+            //status: review.booking.status ? await translateText(review.booking.status, targetLang, sourceLang) : null,
             booking_hours: review.booking.booking_hours ? await translateText(review.booking.booking_hours, targetLang, sourceLang) : null,
             paymentMethod: review.booking.paymentMethod ? await translateText(review.booking.paymentMethod, targetLang, sourceLang) : null
         };
@@ -207,9 +207,9 @@ async function translateBookingFields(booking, targetLang, sourceLang = null) {
     if (booking.ageGroup) {
         translatedBooking.ageGroup = await translateText(booking.ageGroup, targetLang, sourceLang);
     }
-    if (booking.status) {
-        translatedBooking.status = await translateText(booking.status, targetLang, sourceLang);
-    }
+    // if (booking.status) {
+    //     translatedBooking.status = await translateText(booking.status, targetLang, sourceLang);
+    // }
     if (booking.booking_hours) {
         translatedBooking.booking_hours = await translateText(booking.booking_hours, targetLang, sourceLang
         );
@@ -245,7 +245,7 @@ async function translateBookingFields(booking, targetLang, sourceLang = null) {
     if (booking.review) {
         translatedBooking.review = {
             ...booking.review,
-            status: await translateText(booking.review.status, targetLang, sourceLang),
+            //status: await translateText(booking.review.status, targetLang, sourceLang),
             comment: await translateText(booking.review.comment, targetLang, sourceLang)
         };
     }

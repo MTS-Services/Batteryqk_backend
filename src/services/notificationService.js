@@ -160,7 +160,7 @@ const notificationService = {
     // 1. Get All Notifications with Filters
     async getAllNotifications(filters = {}, lang = 'en') {
         try {
-            const { page = 1, limit = 20, ...restFilters } = filters;
+            const { page = 1, limit = 1000, ...restFilters } = filters;
             const pageNum = parseInt(page);
             const limitNum = parseInt(limit);
             const skip = (pageNum - 1) * limitNum;
@@ -259,7 +259,7 @@ const notificationService = {
     // 2. Get Notifications by User UID
     async getNotificationsByUserUid(uid, filters = {}, lang = 'en') {
         try {
-            const { page = 1, limit = 20, ...restFilters } = filters;
+            const { page = 1, limit = 1000, ...restFilters } = filters;
             const pageNum = parseInt(page);
             const limitNum = parseInt(limit);
             const skip = (pageNum - 1) * limitNum;

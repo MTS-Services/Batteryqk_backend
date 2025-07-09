@@ -268,35 +268,6 @@ const notificationService = {
             const user = await prisma.user.findUnique({ where: { uid: uid } });
             if (!user) throw new Error('User not found');
 
-            const cacheKey = cacheKeys.userNotificationsAr(uid);
-
-            // Try cache for Arabic requests
-            if (lang === 'ar' && redisClient.isReady) {
-                const cachedNotifications = await redisClient.get(cacheKey);
-                if (cachedNotifications) {
-                    const parsed = JSON.parse(cachedNotifications);
-                    
-                    // Apply filters and pagination to cached data
-                    let filtered = parsed;
-                    
-                    if (restFilters.type) {
-                        filtered = filtered.filter(n => n.type === restFilters.type);
-                    }
-                    if (restFilters.isRead !== undefined) {
-                        filtered = filtered.filter(n => n.isRead === (restFilters.isRead === 'true'));
-                    }
-                    
-                    const total = filtered.length;
-                    const paginated = filtered.slice(skip, skip + limitNum);
-                    
-                    return {
-                        notifications: paginated,
-                        pagination: { total, page: pageNum, limit: limitNum, totalPages: Math.ceil(total / limitNum) },
-                        source: 'cache'
-                    };
-                }
-            }
-
             // Build where clause for database query
             const whereClause = {
                 userId: user.id,
@@ -304,13 +275,11 @@ const notificationService = {
                 ...(restFilters.isRead !== undefined && { isRead: restFilters.isRead === 'true' }),
             };
 
-            // Get from database with pagination
-            const [notifications, total] = await prisma.$transaction([
+            // Get notification IDs from database first
+            const [notificationIds, total] = await prisma.$transaction([
                 prisma.notification.findMany({
                     where: whereClause,
-                    include: { 
-                        user: { select: { uid: true, fname: true, lname: true, email: true } }
-                    },
+                    select: { id: true },
                     orderBy: { createdAt: 'desc' },
                     skip,
                     take: limitNum
@@ -318,37 +287,72 @@ const notificationService = {
                 prisma.notification.count({ where: whereClause })
             ]);
 
-            let processedNotifications = notifications;
+            console.log(`Database notification IDs found for user ${uid}:`, notificationIds.length);
 
-            if (lang === 'ar' && deeplClient) {
-                // Translate notifications for Arabic
-                processedNotifications = await Promise.all(
-                    notifications.map(notification => translateNotificationFields(notification, 'AR', 'EN'))
-                );
-                
-                // Cache all user notifications (not just the paginated ones) for future requests
-                if (redisClient.isReady) {
-                    const allUserNotifications = await prisma.notification.findMany({
-                        where: { userId: user.id },
-                        include: { 
-                            user: { select: { uid: true, fname: true, lname: true, email: true } }
-                        },
-                        orderBy: { createdAt: 'desc' }
-                    });
+            if (notificationIds.length === 0) {
+                return {
+                    notifications: [],
+                    pagination: { total: 0, page: pageNum, limit: limitNum, totalPages: 0 },
+                    message: lang === 'ar' ? 'لا توجد إشعارات متاحة' : 'No notifications available'
+                };
+            }
+
+            const notifications = [];
+            const missingNotificationIds = [];
+
+            // Try to get each notification from individual cache entries (Arabic only)
+            if (lang === 'ar' && redisClient.isReady) {
+                for (const { id } of notificationIds) {
+                    const cacheKey = cacheKeys.notificationAr(id);
+                    const cachedNotification = await redisClient.get(cacheKey);
                     
-                    const allTranslatedNotifications = await Promise.all(
-                        allUserNotifications.map(notification => translateNotificationFields(notification, 'AR', 'EN'))
-                    );
-                    
-                    await redisClient.setEx(cacheKey, AR_CACHE_EXPIRATION, JSON.stringify(allTranslatedNotifications));
-                    console.log(`Cached ${allTranslatedNotifications.length} notifications for user ${uid} in Arabic`);
+                    if (cachedNotification) {
+                        notifications.push(JSON.parse(cachedNotification));
+                    } else {
+                        missingNotificationIds.push(id);
+                    }
+                }
+                console.log(`Found ${notifications.length} cached notifications for user ${uid}, ${missingNotificationIds.length} missing from cache`);
+            } else {
+                missingNotificationIds.push(...notificationIds.map(n => n.id));
+            }
+
+            // Fetch missing notifications from database
+            if (missingNotificationIds.length > 0) {
+                const missingNotifications = await prisma.notification.findMany({
+                    where: { id: { in: missingNotificationIds } },
+                    include: { 
+                        user: { select: { uid: true, fname: true, lname: true, email: true } }
+                    },
+                    orderBy: { createdAt: 'desc' }
+                });
+
+                // Process missing notifications (translate if needed and cache individually)
+                for (const notification of missingNotifications) {
+                    let processedNotification = notification;
+
+                    if (lang === 'ar' && deeplClient) {
+                        const translatedNotification = await translateNotificationFields(notification, 'AR', 'EN');
+                        processedNotification = translatedNotification;
+
+                        // Cache the translated notification individually
+                        if (redisClient.isReady) {
+                            const cacheKey = cacheKeys.notificationAr(notification.id);
+                            await redisClient.setEx(cacheKey, AR_CACHE_EXPIRATION, JSON.stringify(translatedNotification));
+                        }
+                    }
+
+                    notifications.push(processedNotification);
                 }
             }
 
+            // Sort notifications to maintain original order (by creation date desc)
+            const sortedNotifications = notifications.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
             return {
-                notifications: processedNotifications,
+                notifications: sortedNotifications,
                 pagination: { total, page: pageNum, limit: limitNum, totalPages: Math.ceil(total / limitNum) },
-                source: 'database'
+                source: missingNotificationIds.length > 0 ? 'database+cache' : 'cache'
             };
         } catch (error) {
             console.error(`Failed to get notifications for user ${uid}: ${error.message}`);

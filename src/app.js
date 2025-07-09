@@ -14,6 +14,7 @@ import listingRouter from './routers/listingRouter.js';
 import BookingRouter from './routers/bookingRouter.js'; // If you have a booking router, import it here
 import reviewRouter from './routers/reviewRouter.js'; // If you have a review router, import it here
 import notificationRouter from './routers/notificationRouter.js'; // If you have a notification router, import it here
+import translationScheduler from './utils/notificication.js'; // Import translation scheduler
 
 
 // Import Middlewares
@@ -87,10 +88,15 @@ app.use('/api/reviews', reviewRouter); // If you have a review router, use it he
 app.use('/api/notifications', notificationRouter); // If you have a notification router, use it here
 
 
+
 // if other  mean which i not declare then say hi hackers
 app.use((req, res) => {
  res.send('Hi Hackers, you are not allowed to access this API');
 });
+
+
+
+
 // --- Global Error Handling Middleware ---
 // Must have 4 arguments for Express to recognize it as error handler
 app.use((err, req, res, next) => {
@@ -108,9 +114,15 @@ app.use((err, req, res, next) => {
         error: err // Include the error object itself can sometimes be useful (or strip it in prod)
     });
 });
+
+
+
 // Start the server only if all critical checks passed
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
+
+  // Initialize translation scheduler
+  translationScheduler.start();
 
   // You can keep non-critical warnings here
   if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {

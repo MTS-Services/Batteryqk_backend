@@ -167,9 +167,9 @@ async function translateReviewFields(review, targetLang, sourceLang = null) {
             ...review.booking,
             additionalNote: review.booking.additionalNote ? await translateText(review.booking.additionalNote, targetLang, sourceLang) : null,
             ageGroup: review.booking.ageGroup ? await translateText(review.booking.ageGroup, targetLang, sourceLang) : null,
-            status: review.booking.status ? await translateText(review.booking.status, targetLang, sourceLang) : null,
+           // status: review.booking.status ? await translateText(review.booking.status, targetLang, sourceLang) : null,
             booking_hours: review.booking.booking_hours ? await translateText(review.booking.booking_hours, targetLang, sourceLang) : null,
-            paymentMethod: review.booking.paymentMethod ? await translateText(review.booking.paymentMethod, targetLang, sourceLang) : null
+            //paymentMethod: review.booking.paymentMethod ? await translateText(review.booking.paymentMethod, targetLang, sourceLang) : null
         };
     }
     
@@ -185,17 +185,17 @@ async function translateBookingFields(booking, targetLang, sourceLang = null) {
     if (booking.ageGroup) {
         translatedBooking.ageGroup = await translateText(booking.ageGroup, targetLang, sourceLang);
     }
-    if (booking.status) {
-        translatedBooking.status = await translateText(booking.status, targetLang, sourceLang);
-    }
+    // if (booking.status) {
+    //     translatedBooking.status = await translateText(booking.status, targetLang, sourceLang);
+    // }
     if (booking.booking_hours) {
         translatedBooking.booking_hours = await translateText(booking.booking_hours, targetLang, sourceLang
         );
     }
-    if (booking.paymentMethod) {
-        translatedBooking.paymentMethod = await translateText(booking.paymentMethod, targetLang, sourceLang
-        );
-    }
+    // if (booking.paymentMethod) {
+    //     translatedBooking.paymentMethod = await translateText(booking.paymentMethod, targetLang, sourceLang
+    //     );
+    // }
     if (booking.user) {
         console.log(`Translating user fields for booking ${booking.id}...`);
         // DO NOT translate user's proper names. Preserve them.

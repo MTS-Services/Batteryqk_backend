@@ -180,7 +180,7 @@ async function translateReviewFields(review, targetLang, sourceLang = null) {
             ageGroup: review.booking.ageGroup ? await translateText(review.booking.ageGroup, targetLang, sourceLang) : null,
             //status: review.booking.status ? await translateText(review.booking.status, targetLang, sourceLang) : null,
             booking_hours: review.booking.booking_hours ? await translateText(review.booking.booking_hours, targetLang, sourceLang) : null,
-            paymentMethod: review.booking.paymentMethod ? await translateText(review.booking.paymentMethod, targetLang, sourceLang) : null
+            //paymentMethod: review.booking.paymentMethod ? await translateText(review.booking.paymentMethod, targetLang, sourceLang) : null
         };
     }
     
@@ -204,10 +204,10 @@ async function translateBookingFields(booking, targetLang, sourceLang = null) {
         translatedBooking.booking_hours = await translateText(booking.booking_hours, targetLang, sourceLang
         );
     }
-    if (booking.paymentMethod) {
-        translatedBooking.paymentMethod = await translateText(booking.paymentMethod, targetLang, sourceLang
-        );
-    }
+    // if (booking.paymentMethod) {
+    //     translatedBooking.paymentMethod = await translateText(booking.paymentMethod, targetLang, sourceLang
+    //     );
+    // }
     if (booking.user) {
         console.log(`Translating user fields for booking ${booking.id}...`);
         // DO NOT translate user's proper names. Preserve them.
@@ -359,7 +359,7 @@ async function translateListingFields(listing, targetLang, sourceLang = null) {
                     : null,
                 // DO NOT translate user's proper names. Preserve them.
                 user: await translateText(booking.user.fname, targetLang, sourceLang) + ' ' + await translateText(booking.user.lname, targetLang, sourceLang),
-                paymentMethod: await translateText(booking.paymentMethod, targetLang, sourceLang)
+                //paymentMethod: await translateText(booking.paymentMethod, targetLang, sourceLang)
             }))
         );
     }
@@ -625,9 +625,9 @@ const bookingService = {
                         if (booking.booking_hours) {
                             translatedBooking.booking_hours = await translateText(booking.booking_hours, 'AR', 'EN');
                         }
-                        if (booking.paymentMethod) {
-                            translatedBooking.paymentMethod = await translateText(booking.paymentMethod, 'AR', 'EN');
-                        }
+                        // if (booking.paymentMethod) {
+                        //     translatedBooking.paymentMethod = await translateText(booking.paymentMethod, 'AR', 'EN');
+                        // }
                         
                         // Translate listing fields if present
                         if (booking.listing) {
@@ -732,9 +732,9 @@ const bookingService = {
                 if (booking.booking_hours) {
                     translatedBooking.booking_hours = await translateText(booking.booking_hours, 'AR', 'EN');
                 }
-                if (booking.paymentMethod) {
-                    translatedBooking.paymentMethod = await translateText(booking.paymentMethod, 'AR', 'EN');
-                }
+                // if (booking.paymentMethod) {
+                //     translatedBooking.paymentMethod = await translateText(booking.paymentMethod, 'AR', 'EN');
+                // }
                 
                 // Translate listing fields if present
                 if (booking.listing) {
@@ -821,9 +821,9 @@ const bookingService = {
                     if (booking.booking_hours) {
                         translatedBooking.booking_hours = await translateText(booking.booking_hours, 'AR', 'EN');
                     }
-                    if (booking.paymentMethod) {
-                        translatedBooking.paymentMethod = await translateText(booking.paymentMethod, 'AR', 'EN');
-                    }
+                    // if (booking.paymentMethod) {
+                    //     translatedBooking.paymentMethod = await translateText(booking.paymentMethod, 'AR', 'EN');
+                    // }
                     
                     // Translate listing fields if present
                     if (booking.listing) {
@@ -902,7 +902,7 @@ const bookingService = {
                 if (data.booking_hours) updateData.booking_hours = await translateText(data.booking_hours, 'EN-US', 'AR');
                 if (data.ageGroup) updateData.ageGroup = await translateText(data.ageGroup, 'EN-US', 'AR');
                 // if(data.status) updateData.status = await translateText(data.status, 'EN-US', 'AR');
-                 if(data.paymentMethod) updateData.paymentMethod = await translateText(data.paymentMethod, 'EN-US', 'AR');
+                //  if(data.paymentMethod) updateData.paymentMethod = await translateText(data.paymentMethod, 'EN-US', 'AR');
                   if (data.status || data.paymentMethod) {
                 updateData.status = updateData.status.toUpperCase();
                 updateData.paymentMethod = updateData.paymentMethod ? updateData.paymentMethod.toUpperCase() : 'UNPAID';

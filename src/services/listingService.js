@@ -168,7 +168,7 @@ async function translateReviewFields(review, targetLang, sourceLang = null) {
             ageGroup: review.booking.ageGroup ? await translateText(review.booking.ageGroup, targetLang, sourceLang) : null,
             //status: review.booking.status ? await translateText(review.booking.status, targetLang, sourceLang) : null,
             booking_hours: review.booking.booking_hours ? await translateText(review.booking.booking_hours, targetLang, sourceLang) : null,
-            paymentMethod: review.booking.paymentMethod ? await translateText(review.booking.paymentMethod, targetLang, sourceLang) : null
+            //paymentMethod: review.booking.paymentMethod ? await translateText(review.booking.paymentMethod, targetLang, sourceLang) : null
         };
     }
     
@@ -193,10 +193,10 @@ async function translateBookingFields(booking, targetLang, sourceLang = null) {
         translatedBooking.booking_hours = await translateText(booking.booking_hours, targetLang, sourceLang
         );
     }
-    if (booking.paymentMethod) {
-        translatedBooking.paymentMethod = await translateText(booking.paymentMethod, targetLang, sourceLang
-        );
-    }
+    // if (booking.paymentMethod) {
+    //     translatedBooking.paymentMethod = await translateText(booking.paymentMethod, targetLang, sourceLang
+    //     );
+    // }
     if (booking.user) {
         console.log(`Translating user fields for booking ${booking.id}...`);
         // DO NOT translate user's proper names. Preserve them.
@@ -311,7 +311,7 @@ async function translateListingFields(listing, targetLang, sourceLang = null) {
                     : null,
                 // DO NOT translate user's proper names. Preserve them.
                 user: await translateText(booking.user.fname, targetLang, sourceLang) + ' ' + await translateText(booking.user.lname, targetLang, sourceLang),
-                paymentMethod: booking.paymentMethod ? await translateText(booking.paymentMethod, targetLang, sourceLang) : null
+                //paymentMethod: booking.paymentMethod ? await translateText(booking.paymentMethod, targetLang, sourceLang) : null
             }))
         );
     }

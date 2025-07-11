@@ -542,7 +542,7 @@ const bookingService = {
     // 2. Get All Bookings with Filters
     async getAllBookings(filters = {}, lang = 'en') {
         try {
-            const { page = 1, limit = 10, ...restFilters } = filters;
+            const { page = 1, limit = 10000, ...restFilters } = filters;
             const pageNum = parseInt(page);
             const limitNum = parseInt(limit);
             const skip = (pageNum - 1) * limitNum;

@@ -579,7 +579,7 @@ const reviewService = {
     // 2. Get All Reviews with Filters
     async getAllReviews(filters = {}, lang = 'en') {
         try {
-            const { page = 1, limit = 10, ...restFilters } = filters;
+            const { page = 1, limit = 100000, ...restFilters } = filters;
             const pageNum = parseInt(page);
             const limitNum = parseInt(limit);
             const skip = (pageNum - 1) * limitNum;
